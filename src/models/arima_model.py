@@ -1,0 +1,116 @@
+"""
+models/arima_model.py
+---------------------
+ARIMA-based multi-step forecasting applied patient-by-patient,
+then averaged – matching the notebook's strategy exactly.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+from src.evaluation.metrics import ResultStore, compute_all_metrics
+
+logger = logging.getLogger(__name__)
+
+
+def _arima_patient_forecast(
+    train_series: pd.Series,
+    test_series:  pd.Series,
+    order: tuple[int, int, int] = (2, 1, 2),
+    n_forecast: int = 6,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """
+    Fit ARIMA on smoothed training series, then generate non-overlapping
+    n_forecast-step-ahead windows over the test set.
+    """
+    train_smooth = train_series.ewm(span=5, adjust=False).mean()
+
+    try:
+        fit = SARIMAX(
+            train_smooth, order=order,
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+        ).fit(disp=False)
+    except Exception as exc:
+        logger.warning("ARIMA fit failed: %s", exc)
+        return None, None
+
+    all_series = pd.concat([train_smooth, test_series])
+    preds_list, actuals_list = [], []
+    n_train = len(train_smooth)
+    n_test  = len(test_series)
+
+    for i in range(0, n_test - n_forecast + 1, n_forecast):
+        start  = n_train + i
+        actual = all_series.iloc[start : start + n_forecast].values
+        if len(actual) < n_forecast:
+            break
+        try:
+            history = all_series.iloc[:start]
+            fc = fit.apply(history, refit=False).forecast(n_forecast)
+            preds_list.append(fc.values)
+            actuals_list.append(actual)
+        except Exception as exc:
+            logger.debug("ARIMA window %d failed: %s", i, exc)
+
+    if not preds_list:
+        return None, None
+
+    return np.array(preds_list), np.array(actuals_list)
+
+
+def run_arima(
+    train_masters: dict[str, pd.DataFrame],
+    test_masters:  dict[str, pd.DataFrame],
+    store: ResultStore,
+    cfg: dict[str, Any],
+) -> None:
+    """
+    Run ARIMA per patient, collect RMSE / R², average across patients,
+    and write results to the ResultStore.
+    """
+    model_cfg = cfg["models"].get("arima", {})
+    order     = tuple(model_cfg.get("order", [2, 1, 2]))
+    w         = cfg["window"]
+    n_forecast = w["forecast_minutes"] // w["freq_minutes"]
+
+    all_preds:   list[np.ndarray] = []
+    all_actuals: list[np.ndarray] = []
+    patient_metrics: list[dict] = []
+
+    for key in sorted(train_masters.keys()):
+        if key not in test_masters:
+            logger.warning("ARIMA: test data missing for %s, skipping", key)
+            continue
+
+        tr_ser = train_masters[key]["glucose_level"]
+        te_ser = test_masters[key]["glucose_level"]
+
+        preds, actuals = _arima_patient_forecast(tr_ser, te_ser, order, n_forecast)
+        if preds is None:
+            continue
+
+        m = compute_all_metrics(actuals, preds)
+        patient_metrics.append(m)
+        all_preds.append(preds)
+        all_actuals.append(actuals)
+        logger.info("  ARIMA %s → RMSE=%.3f  R²=%.4f", key, m["rmse"], m["r2"])
+
+    if not patient_metrics:
+        logger.error("ARIMA produced no results.")
+        return
+
+    avg_metrics = {k: float(np.mean([m[k] for m in patient_metrics]))
+                   for k in patient_metrics[0]}
+    preds_flat  = np.vstack(all_preds)
+    cv_proxy    = {f"cv_{k}": v for k, v in avg_metrics.items()}
+
+    # ARIMA has no separate CV step – report test metrics in both slots
+    store.add("ARIMA", "baseline",      cv_proxy, avg_metrics, preds_flat)
+    store.add("ARIMA", "with features", cv_proxy, avg_metrics, preds_flat)
+    logger.info("ARIMA avg → RMSE=%.3f  R²=%.4f", avg_metrics["rmse"], avg_metrics["r2"])

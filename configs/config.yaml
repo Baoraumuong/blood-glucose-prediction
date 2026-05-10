@@ -1,0 +1,130 @@
+# =============================================================================
+# Blood Glucose Prediction – Master Configuration
+# OhioT1DM Dataset
+# =============================================================================
+
+# ─── Paths ──────────────────────────────────────────────────────────────────
+paths:
+  data_dir: "data/OhioT1DM"          # root of extracted OhioT1DM dataset
+  output_dir: "output"
+  results_dir: "output/results"
+  logs_dir: "output/logs"
+  plots_dir: "output/plots"
+  checkpoints_dir: "output/checkpoints"
+
+# ─── Dataset ────────────────────────────────────────────────────────────────
+dataset:
+  cohorts:
+    "2018": [559, 563, 570, 575, 588, 591]
+    "2020": [540, 544, 552, 567, 584, 596]
+  train_suffix: "-ws-training.xml"
+  test_suffix:  "-ws-testing.xml"
+
+  features:
+    - glucose_level
+    - bolus
+    - basal
+    - temp_basal
+    - basis_gsr
+    - basis_skin_temperature
+    - basis_air_temperature
+    - basis_steps
+    - basis_sleep
+
+  resample_freq: "5min"              # CGM sampling interval
+
+# ─── Time-series windows ────────────────────────────────────────────────────
+window:
+  lookback_minutes: 30               # history fed to model
+  forecast_minutes: 30               # prediction horizon
+  freq_minutes:     5                # minutes between CGM readings
+
+# ─── Feature engineering ────────────────────────────────────────────────────
+feature_engineering:
+  savgol_window:    11               # Savitzky-Golay smoothing window
+  savgol_polyorder: 2
+  interpolate_limit: 6              # max consecutive NaN steps to fill
+  rolling_insulin_window: 36        # 3-hour window (36 × 5 min) for std
+
+# ─── Evaluation ─────────────────────────────────────────────────────────────
+evaluation:
+  n_folds: 5
+  kfold_shuffle: false               # preserve temporal order
+  svr_subsample: 5000                # max samples for SVR cross-validation
+  metrics:
+    - rmse
+    - mae
+    - r2
+    - mard                           # mean absolute relative difference
+
+# ─── Classical ML models ────────────────────────────────────────────────────
+models:
+  linear_regression:
+    enabled: true
+
+  svr:
+    enabled: true
+    kernel: rbf
+    C: 10
+    epsilon: 0.1
+
+  xgboost:
+    enabled: true
+    n_estimators: 300
+    max_depth: 5
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+
+  decision_tree:
+    enabled: true
+    max_depth: 8
+    min_samples_leaf: 10
+
+  random_forest:
+    enabled: true
+    n_estimators: 200
+    max_depth: 10
+    min_samples_leaf: 5
+
+  knn:
+    enabled: true
+    n_neighbors: 10
+    weights: distance
+
+  arima:
+    enabled: true
+    order: [2, 1, 2]
+
+# ─── Deep learning ──────────────────────────────────────────────────────────
+deep_learning:
+  epochs: 60
+  batch_size: 256
+  validation_split: 0.1
+  optimizer: adam
+  learning_rate: 0.001
+  early_stopping_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  min_lr: 1.0e-6
+
+  lstm:
+    enabled: true
+    units: [128, 64]
+    dropout: 0.2
+    dense_units: 32
+
+  gru:
+    enabled: true
+    units: [128, 64]
+    dropout: 0.2
+    dense_units: 32
+
+# ─── Reproducibility ────────────────────────────────────────────────────────
+seed: 42
+
+# ─── Logging ────────────────────────────────────────────────────────────────
+logging:
+  level: INFO                        # DEBUG | INFO | WARNING | ERROR
+  log_to_file: true
+  filename_prefix: "bg_prediction"
