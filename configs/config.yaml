@@ -33,9 +33,19 @@ dataset:
     - basis_air_temperature
     - basis_steps
     - basis_sleep
-    - accelaration
+    - acceleration
 
   resample_freq: "5min"              # CGM sampling interval
+
+  missing_report_features:
+    - acceleration
+    - basis_air_temperature
+    - basis_gsr
+    - basis_heart_rate
+    - basis_skin_temperature
+    - basis_sleep
+    - basis_steps
+    - glucose_level
 
 # ─── Time-series windows ────────────────────────────────────────────────────
 window:
@@ -49,6 +59,12 @@ feature_engineering:
   savgol_polyorder: 2
   interpolate_limit: 6              # max consecutive NaN steps to fill
   rolling_insulin_window: 36        # 3-hour window (36 × 5 min) for std
+  exclude_features:
+    - acceleration
+    - basis_steps
+    - basis_air_temperature
+    - basis_skin_temperature
+    - basis_heart_rate
 
 # ─── Evaluation ─────────────────────────────────────────────────────────────
 evaluation:

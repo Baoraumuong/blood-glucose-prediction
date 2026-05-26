@@ -10,7 +10,7 @@ build/
 venv/
 
 # Data (never commit raw patient data)
-data/
+src/data/OhioT1DM
 *.xml
 *.zip
 
@@ -34,3 +34,5 @@ notebooks/.ipynb_checkpoints/
 Thumbs.db
 
 .pytest_cache/
+
+tests/

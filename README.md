@@ -191,11 +191,24 @@ This replicates the strategy from the original exploratory notebook exactly:
 
 | Feature | Description |
 |---|---|
-| `glucose_level` | CGM signal, Savitzky-Golay smoothed (window=11, poly=2); linear interpolation for gaps ≤30 min |
-| `total_insulin` | Bolus dose + basal rate × 5 min / 60 (units per window) |
+| `glucose_level` | CGM signal, Savitzky-Golay smoothed (window=11, poly=2); linear interpolation for gaps <=30 min |
+| `basis_gsr` | GSR wearable signal snapped to the nearest CGM timestamp, then forward/back-filled for model windows |
+| `basis_sleep` | Sleep wearable signal snapped to the nearest CGM timestamp, then forward/back-filled for model windows |
+| `total_insulin` | Bolus dose + basal rate x 5 min / 60 (units per window); insulin events are snapped to the nearest CGM timestamp before aggregation |
 | `insulin_count` | Number of bolus events per 5-min window |
 | `insulin_3h_std` | Rolling 3-hour std of total insulin (variability indicator) |
-| `daily_exercise` | Cumulative step count, reset at midnight |
+| `daily_exercise` | Cumulative exercise duration, reset at midnight |
+
+Features with very high missingness (`acceleration`, `basis_steps`,
+`basis_air_temperature`, `basis_skin_temperature`, `basis_heart_rate`) are excluded from
+the engineered model input. Missingness reporting is limited to regularly checked signals
+configured in `dataset.missing_report_features`; unavailable feature data is reported as
+`NA`, not `0`.
+
+All non-CGM timestamps are rounded to the nearest `glucose_level` timestamp before
+windowing or correlation. Correlation diagnostics compare only rows that share the same
+timestamp after this alignment. The ADF helper drops invalid values and returns a
+non-testable result for constant or too-short series instead of raising.
 
 ---
 

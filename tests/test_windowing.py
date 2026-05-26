@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.features.windowing import create_multistep_dataset, DatasetScaler, prepare_datasets
+from src.features.windowing import (
+    create_multistep_dataset,
+    DatasetScaler,
+    prepare_datasets,
+)
 
 
 def _make_df(n_rows: int = 50, n_features: int = 3) -> pd.DataFrame:
@@ -56,6 +60,32 @@ def test_prepare_datasets_uses_raw_glucose_as_target():
 
     np.testing.assert_allclose(datasets["y_train"][0], [2, 3])
     assert datasets["X_train_3d"].shape[-1] == 5
+
+
+def test_prepare_datasets_excludes_high_missing_features():
+    idx = pd.date_range("2022-01-01", periods=20, freq="5min")
+    df = pd.DataFrame(
+        {
+            "raw_glucose_level": np.arange(20, dtype=np.float32),
+            "glucose_level": np.arange(20, dtype=np.float32),
+            "basis_gsr": np.ones(20, dtype=np.float32),
+            "basis_sleep": np.zeros(20, dtype=np.float32),
+            "basis_heart_rate": np.full(20, 80, dtype=np.float32),
+            "acceleration": np.full(20, 1, dtype=np.float32),
+        },
+        index=idx,
+    )
+    cfg = {
+        "window": {"lookback_minutes": 10, "forecast_minutes": 10, "freq_minutes": 5},
+        "feature_engineering": {
+            "exclude_features": ["basis_heart_rate", "acceleration"],
+        },
+    }
+
+    datasets = prepare_datasets({"p": df}, {"p": df}, cfg)
+
+    assert datasets["full_feature_cols"] == ["glucose_level", "basis_gsr", "basis_sleep"]
+    assert datasets["X_train_3d"].shape[-1] == 3
 
 
 def test_dataset_scaler_fit_transform_shapes():

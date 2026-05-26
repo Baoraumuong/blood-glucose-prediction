@@ -37,6 +37,7 @@ def _run_model(
     svr_subsample: int | None = None,
     train_subsample: int | None = None,
     seed: int = 42,
+    feature_names: list[str] | None = None,
 ) -> None:
     """Shared CV + test routine for classical models."""
     logger.info("Training %s (%s) …", name, feature_tag)
@@ -57,6 +58,41 @@ def _run_model(
     cv_metrics  = cv_evaluate(model, Xcv, ycv, n_folds=n_folds)
     preds, test_metrics = test_evaluate(model, Xfit, yfit, X_test, y_test)
     store.add(name, feature_tag, cv_metrics, test_metrics, preds)
+    _log_top_feature_importances(model, name, feature_tag, feature_names)
+
+
+def _model_importances(model: Any) -> np.ndarray | None:
+    """Extract aggregate feature importances or absolute coefficients."""
+    if hasattr(model, "feature_importances_"):
+        return np.asarray(model.feature_importances_, dtype=float)
+    if hasattr(model, "coef_"):
+        coef = np.asarray(model.coef_, dtype=float)
+        return np.mean(np.abs(coef), axis=0) if coef.ndim > 1 else np.abs(coef)
+    if hasattr(model, "estimators_"):
+        values = [_model_importances(est) for est in model.estimators_]
+        values = [v for v in values if v is not None]
+        if values:
+            return np.mean(values, axis=0)
+    return None
+
+
+def _log_top_feature_importances(
+    model: Any,
+    name: str,
+    feature_tag: str,
+    feature_names: list[str] | None,
+    top_n: int = 5,
+) -> None:
+    if not feature_names:
+        return
+    importances = _model_importances(model)
+    if importances is None or len(importances) != len(feature_names):
+        return
+    order = np.argsort(importances)[::-1][:top_n]
+    formatted = ", ".join(
+        f"{feature_names[i]}={importances[i]:.4f}" for i in order
+    )
+    logger.info("Top %d features for %s (%s): %s", top_n, name, feature_tag, formatted)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,8 +113,14 @@ def run_linear_regression(
         ("baseline",      datasets["X_train_2d_base_s"], datasets["X_test_2d_base_s"],
          datasets["y_train_base"], datasets["y_test_base"]),
     ]:
+        feature_names = (
+            datasets["full_flat_feature_names"]
+            if tag == "with features"
+            else datasets["base_flat_feature_names"]
+        )
         _run_model(LinearRegression(), "LinearRegression", tag,
-                   Xtr, ytr, Xte, yte, store, n_folds)
+                   Xtr, ytr, Xte, yte, store, n_folds,
+                   feature_names=feature_names)
 
 
 def run_svr(
@@ -108,9 +150,15 @@ def run_svr(
          datasets["y_train_base"], datasets["y_test_base"]),
     ]:
         model = MultiOutputRegressor(base_svr, n_jobs=-1)
+        feature_names = (
+            datasets["full_flat_feature_names"]
+            if tag == "with features"
+            else datasets["base_flat_feature_names"]
+        )
         _run_model(model, "SVR", tag, Xtr, ytr, Xte, yte, store,
                    n_folds, svr_subsample=subsample,
-                   train_subsample=train_subsample, seed=seed)
+                   train_subsample=train_subsample, seed=seed,
+                   feature_names=feature_names)
 
 
 def run_xgboost(
@@ -141,7 +189,13 @@ def run_xgboost(
          datasets["y_train_base"], datasets["y_test_base"]),
     ]:
         model = MultiOutputRegressor(base_xgb, n_jobs=-1)
-        _run_model(model, "XGBoost", tag, Xtr, ytr, Xte, yte, store, n_folds)
+        feature_names = (
+            datasets["full_flat_feature_names"]
+            if tag == "with features"
+            else datasets["base_flat_feature_names"]
+        )
+        _run_model(model, "XGBoost", tag, Xtr, ytr, Xte, yte, store, n_folds,
+                   feature_names=feature_names)
 
 
 def run_decision_tree(
@@ -165,7 +219,13 @@ def run_decision_tree(
             min_samples_leaf=model_cfg.get("min_samples_leaf", 10),
             random_state=seed,
         )
-        _run_model(model, "DecisionTree", tag, Xtr, ytr, Xte, yte, store, n_folds)
+        feature_names = (
+            datasets["full_flat_feature_names"]
+            if tag == "with features"
+            else datasets["base_flat_feature_names"]
+        )
+        _run_model(model, "DecisionTree", tag, Xtr, ytr, Xte, yte, store, n_folds,
+                   feature_names=feature_names)
 
 
 def run_random_forest(
@@ -191,7 +251,13 @@ def run_random_forest(
             n_jobs=-1,
             random_state=seed,
         )
-        _run_model(model, "RandomForest", tag, Xtr, ytr, Xte, yte, store, n_folds)
+        feature_names = (
+            datasets["full_flat_feature_names"]
+            if tag == "with features"
+            else datasets["base_flat_feature_names"]
+        )
+        _run_model(model, "RandomForest", tag, Xtr, ytr, Xte, yte, store, n_folds,
+                   feature_names=feature_names)
 
 
 def run_knn(
@@ -214,4 +280,10 @@ def run_knn(
             weights=model_cfg.get("weights", "distance"),
             n_jobs=-1,
         )
-        _run_model(model, "KNN", tag, Xtr, ytr, Xte, yte, store, n_folds)
+        feature_names = (
+            datasets["full_flat_feature_names"]
+            if tag == "with features"
+            else datasets["base_flat_feature_names"]
+        )
+        _run_model(model, "KNN", tag, Xtr, ytr, Xte, yte, store, n_folds,
+                   feature_names=feature_names)

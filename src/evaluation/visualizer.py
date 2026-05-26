@@ -38,9 +38,12 @@ def plot_missing_heatmap(
     missing_df: pd.DataFrame,
     save_path: str | None = None,
 ) -> plt.Figure:
-    pivot = missing_df.pivot(index="patient", columns="feature", values="missing_pct")
+    plot_df = missing_df.copy()
+    plot_df["missing_pct_numeric"] = pd.to_numeric(plot_df["missing_pct"], errors="coerce")
+    pivot = plot_df.pivot(index="patient", columns="feature", values="missing_pct_numeric")
+    labels = pivot.round(1).astype("object").where(pivot.notna(), "NA")
     fig, ax = plt.subplots(figsize=(14, 5))
-    sns.heatmap(pivot, annot=True, fmt=".1f", cmap="YlOrRd",
+    sns.heatmap(pivot, annot=labels, fmt="", cmap="YlOrRd",
                 linewidths=0.5, ax=ax, cbar_kws={"label": "Missing %"})
     ax.set_title("Missing Data (%) per Patient & Feature", fontsize=14, pad=12)
     if save_path:

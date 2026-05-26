@@ -18,6 +18,22 @@ logger = logging.getLogger(__name__)
 
 TARGET_COL = "glucose_level"
 RAW_TARGET_COL = "raw_glucose_level"
+DEFAULT_EXCLUDED_FEATURES = {
+    "acceleration",
+    "basis_steps",
+    "basis_air_temperature",
+    "basis_skin_temperature",
+    "basis_heart_rate",
+}
+
+
+def flatten_feature_names(feature_cols: list[str], lookback_steps: int) -> list[str]:
+    """Return names matching flattened 2-D window columns."""
+    return [
+        f"{feature}_t-{lookback_steps - step}"
+        for step in range(lookback_steps)
+        for feature in feature_cols
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,7 +267,17 @@ def prepare_datasets(
         else TARGET_COL
     )
     sample_df = next(iter(train_masters.values()))
-    full_feature_cols = [c for c in sample_df.columns if c != RAW_TARGET_COL]
+    excluded = set(cfg.get("feature_engineering", {}).get(
+        "exclude_features",
+        DEFAULT_EXCLUDED_FEATURES,
+    ))
+    full_feature_cols = [
+        c for c in sample_df.columns
+        if c != RAW_TARGET_COL and c not in excluded
+    ]
+    logger.info("Full model input features: %s", full_feature_cols)
+    if excluded:
+        logger.info("Excluded high-missing features: %s", sorted(excluded))
 
     X_train_full, y_train = build_global_dataset(
         train_masters,
@@ -319,4 +345,8 @@ def prepare_datasets(
         y_test_s=y_test_s,
         scaler_full=scaler_full,
         scaler_base=scaler_base,
+        full_feature_cols=full_feature_cols,
+        base_feature_cols=[TARGET_COL],
+        full_flat_feature_names=flatten_feature_names(full_feature_cols, lb_steps),
+        base_flat_feature_names=flatten_feature_names([TARGET_COL], lb_steps),
     )
