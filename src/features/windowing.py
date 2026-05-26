@@ -17,6 +17,7 @@ from sklearn.preprocessing import MinMaxScaler
 logger = logging.getLogger(__name__)
 
 TARGET_COL = "glucose_level"
+RAW_TARGET_COL = "raw_glucose_level"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -28,6 +29,7 @@ def create_multistep_dataset(
     target_col: str = TARGET_COL,
     lookback_steps: int = 6,
     forecast_steps: int = 6,
+    feature_cols: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate sliding-window arrays preserving temporal order.
@@ -38,6 +40,9 @@ def create_multistep_dataset(
         Patient master DataFrame (rows = time steps).
     target_col : str
         Column used as the prediction target.
+    feature_cols : list[str] | None
+        Columns used as model inputs. Defaults to all columns, preserving the
+        original autoregressive behavior.
     lookback_steps : int
         Number of past steps fed to the model.
     forecast_steps : int
@@ -48,13 +53,26 @@ def create_multistep_dataset(
     X : np.ndarray, shape (n_windows, lookback_steps, n_features)
     y : np.ndarray, shape (n_windows, forecast_steps)
     """
-    data = df.values.astype(np.float32)
-    tidx = df.columns.get_loc(target_col)
+    if feature_cols is None:
+        feature_cols = list(df.columns)
+
+    feature_data = df[feature_cols].values.astype(np.float32)
+    target_data = df[target_col].values.astype(np.float32)
     X, y = [], []
 
     for i in range(len(df) - lookback_steps - forecast_steps + 1):
-        X.append(data[i : i + lookback_steps, :])
-        y.append(data[i + lookback_steps : i + lookback_steps + forecast_steps, tidx])
+        x_window = feature_data[i : i + lookback_steps, :]
+        y_window = target_data[i + lookback_steps : i + lookback_steps + forecast_steps]
+        if np.isnan(x_window).any() or np.isnan(y_window).any():
+            continue
+        X.append(x_window)
+        y.append(y_window)
+
+    if not X:
+        return (
+            np.empty((0, lookback_steps, len(feature_cols)), dtype=np.float32),
+            np.empty((0, forecast_steps), dtype=np.float32),
+        )
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
@@ -64,6 +82,7 @@ def build_global_dataset(
     lookback_steps: int = 6,
     forecast_steps: int = 6,
     target_col: str = TARGET_COL,
+    feature_cols: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Concatenate windows from all patients without cross-patient contamination.
@@ -76,6 +95,8 @@ def build_global_dataset(
         Window sizes.
     target_col : str
         Prediction target column name.
+    feature_cols : list[str] | None
+        Input columns to include in X.
 
     Returns
     -------
@@ -89,7 +110,16 @@ def build_global_dataset(
         if df.empty or len(df) < min_len:
             logger.warning("Skipping %s: only %d rows (need %d)", pid, len(df), min_len)
             continue
-        Xp, yp = create_multistep_dataset(df, target_col, lookback_steps, forecast_steps)
+        Xp, yp = create_multistep_dataset(
+            df,
+            target_col=target_col,
+            lookback_steps=lookback_steps,
+            forecast_steps=forecast_steps,
+            feature_cols=feature_cols,
+        )
+        if len(Xp) == 0:
+            logger.warning("Skipping %s: no complete target windows", pid)
+            continue
         all_X.append(Xp)
         all_y.append(yp)
         logger.debug("  %s: %d windows", pid, len(Xp))
@@ -214,14 +244,45 @@ def prepare_datasets(
     logger.info("Building windowed datasets (lookback=%d, forecast=%d steps) …", lb_steps, fc_steps)
 
     # ── Full feature set ─────────────────────────────────────────────────
-    X_train_full, y_train = build_global_dataset(train_masters, lb_steps, fc_steps)
-    X_test_full,  y_test  = build_global_dataset(test_masters,  lb_steps, fc_steps)
+    all_master_dfs = [*train_masters.values(), *test_masters.values()]
+    target_col = (
+        RAW_TARGET_COL
+        if all(RAW_TARGET_COL in df.columns for df in all_master_dfs)
+        else TARGET_COL
+    )
+    sample_df = next(iter(train_masters.values()))
+    full_feature_cols = [c for c in sample_df.columns if c != RAW_TARGET_COL]
+
+    X_train_full, y_train = build_global_dataset(
+        train_masters,
+        lb_steps,
+        fc_steps,
+        target_col=target_col,
+        feature_cols=full_feature_cols,
+    )
+    X_test_full,  y_test  = build_global_dataset(
+        test_masters,
+        lb_steps,
+        fc_steps,
+        target_col=target_col,
+        feature_cols=full_feature_cols,
+    )
 
     # ── Glucose-only baseline ─────────────────────────────────────────────
-    train_gl = {k: df[[TARGET_COL]] for k, df in train_masters.items()}
-    test_gl  = {k: df[[TARGET_COL]] for k, df in test_masters.items()}
-    X_train_base, y_train_base = build_global_dataset(train_gl, lb_steps, fc_steps)
-    X_test_base,  y_test_base  = build_global_dataset(test_gl,  lb_steps, fc_steps)
+    X_train_base, y_train_base = build_global_dataset(
+        train_masters,
+        lb_steps,
+        fc_steps,
+        target_col=target_col,
+        feature_cols=[TARGET_COL],
+    )
+    X_test_base,  y_test_base  = build_global_dataset(
+        test_masters,
+        lb_steps,
+        fc_steps,
+        target_col=target_col,
+        feature_cols=[TARGET_COL],
+    )
 
     logger.info(
         "Dataset shapes – full: X_train=%s, baseline: X_train=%s",

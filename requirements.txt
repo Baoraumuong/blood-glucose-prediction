@@ -1,4 +1,3 @@
-# Blood Glucose Time-Series Prediction – Python Dependencies
 # Install with:  pip install -r requirements.txt
 
 # ─── Core data science ──────────────────────────────────────────────────────
@@ -11,7 +10,7 @@ scikit-learn>=1.4
 xgboost>=2.0
 
 # ─── Deep learning ──────────────────────────────────────────────────────────
-tensorflow>=2.15          # or use tensorflow-cpu for CPU-only machines
+tensorflow>=2.15       
 
 # ─── Time-series statistics ─────────────────────────────────────────────────
 statsmodels>=0.14
@@ -25,7 +24,7 @@ pyyaml>=6.0
 tqdm>=4.66
 joblib>=1.3
 
-# ─── Notebook (EDA only) ────────────────────────────────────────────────────
+# ─── Notebook ────────────────────────────────────────────────────
 jupyter>=1.0
 ipykernel>=6.0
 ipywidgets>=8.0

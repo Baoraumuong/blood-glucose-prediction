@@ -89,7 +89,7 @@ def run_arima(
             continue
 
         tr_ser = train_masters[key]["glucose_level"]
-        te_ser = test_masters[key]["glucose_level"]
+        te_ser = test_masters[key].get("raw_glucose_level", test_masters[key]["glucose_level"])
 
         preds, actuals = _arima_patient_forecast(tr_ser, te_ser, order, n_forecast)
         if preds is None:

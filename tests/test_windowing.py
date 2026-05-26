@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.features.windowing import create_multistep_dataset, DatasetScaler
+from src.features.windowing import create_multistep_dataset, DatasetScaler, prepare_datasets
 
 
 def _make_df(n_rows: int = 50, n_features: int = 3) -> pd.DataFrame:
@@ -35,6 +35,27 @@ def test_create_multistep_target_values():
     # Window 0: X uses rows 0:5, y uses rows 5:8
     expected_y0 = df["glucose_level"].values[lb : lb + fc]
     np.testing.assert_allclose(y[0], expected_y0, rtol=1e-5)
+
+
+def test_prepare_datasets_uses_raw_glucose_as_target():
+    idx = pd.date_range("2022-01-01", periods=20, freq="5min")
+    df = pd.DataFrame(
+        {
+            "raw_glucose_level": np.arange(20, dtype=np.float32),
+            "glucose_level": np.arange(20, dtype=np.float32) + 100,
+            "total_insulin": np.zeros(20, dtype=np.float32),
+            "insulin_count": np.zeros(20, dtype=np.float32),
+            "insulin_3h_std": np.zeros(20, dtype=np.float32),
+            "daily_exercise": np.zeros(20, dtype=np.float32),
+        },
+        index=idx,
+    )
+    cfg = {"window": {"lookback_minutes": 10, "forecast_minutes": 10, "freq_minutes": 5}}
+
+    datasets = prepare_datasets({"p": df}, {"p": df}, cfg)
+
+    np.testing.assert_allclose(datasets["y_train"][0], [2, 3])
+    assert datasets["X_train_3d"].shape[-1] == 5
 
 
 def test_dataset_scaler_fit_transform_shapes():

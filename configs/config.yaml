@@ -5,7 +5,7 @@
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 paths:
-  data_dir: "data/OhioT1DM"          # root of extracted OhioT1DM dataset
+  data_dir: "src/data/OhioT1DM"          # root of extracted OhioT1DM dataset
   output_dir: "output"
   results_dir: "output/results"
   logs_dir: "output/logs"
@@ -22,14 +22,18 @@ dataset:
 
   features:
     - glucose_level
-    - bolus
+    - finger_stick
     - basal
     - temp_basal
+    - bolus
+    - exercise
+    - basis_heart_rate
     - basis_gsr
     - basis_skin_temperature
     - basis_air_temperature
     - basis_steps
     - basis_sleep
+    - accelaration
 
   resample_freq: "5min"              # CGM sampling interval
 
@@ -51,6 +55,7 @@ evaluation:
   n_folds: 5
   kfold_shuffle: false               # preserve temporal order
   svr_subsample: 5000                # max samples for SVR cross-validation
+  svr_train_subsample: 5000          # max samples for final SVR fit
   metrics:
     - rmse
     - mae
@@ -67,6 +72,8 @@ models:
     kernel: rbf
     C: 10
     epsilon: 0.1
+    cache_size: 1000
+    shrinking: true
 
   xgboost:
     enabled: true

@@ -35,6 +35,8 @@ def _run_model(
     store:   ResultStore,
     n_folds: int = 5,
     svr_subsample: int | None = None,
+    train_subsample: int | None = None,
+    seed: int = 42,
 ) -> None:
     """Shared CV + test routine for classical models."""
     logger.info("Training %s (%s) …", name, feature_tag)
@@ -42,11 +44,18 @@ def _run_model(
     # Cross-validation (optionally sub-sampled for slow models like SVR)
     Xcv, ycv = X_train, y_train
     if svr_subsample and len(X_train) > svr_subsample:
-        idx  = np.random.choice(len(X_train), svr_subsample, replace=False)
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(X_train), svr_subsample, replace=False)
         Xcv, ycv = X_train[idx], y_train[idx]
 
+    Xfit, yfit = X_train, y_train
+    if train_subsample and len(X_train) > train_subsample:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(X_train), train_subsample, replace=False)
+        Xfit, yfit = X_train[idx], y_train[idx]
+
     cv_metrics  = cv_evaluate(model, Xcv, ycv, n_folds=n_folds)
-    preds, test_metrics = test_evaluate(model, X_train, y_train, X_test, y_test)
+    preds, test_metrics = test_evaluate(model, Xfit, yfit, X_test, y_test)
     store.add(name, feature_tag, cv_metrics, test_metrics, preds)
 
 
@@ -81,11 +90,15 @@ def run_svr(
     model_cfg = cfg["models"].get("svr", {})
     n_folds   = eval_cfg.get("n_folds", 5)
     subsample = eval_cfg.get("svr_subsample", 5000)
+    train_subsample = eval_cfg.get("svr_train_subsample", subsample)
+    seed = cfg.get("seed", 42)
 
     base_svr = SVR(
         kernel=model_cfg.get("kernel", "rbf"),
         C=model_cfg.get("C", 10),
         epsilon=model_cfg.get("epsilon", 0.1),
+        cache_size=model_cfg.get("cache_size", 1000),
+        shrinking=model_cfg.get("shrinking", True),
     )
 
     for tag, Xtr, Xte, ytr, yte in [
@@ -96,7 +109,8 @@ def run_svr(
     ]:
         model = MultiOutputRegressor(base_svr, n_jobs=-1)
         _run_model(model, "SVR", tag, Xtr, ytr, Xte, yte, store,
-                   n_folds, svr_subsample=subsample)
+                   n_folds, svr_subsample=subsample,
+                   train_subsample=train_subsample, seed=seed)
 
 
 def run_xgboost(
