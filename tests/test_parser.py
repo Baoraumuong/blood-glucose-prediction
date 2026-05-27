@@ -84,15 +84,17 @@ def test_missing_feature_returns_empty():
         os.remove(path)
 
 
-def test_missing_stats_unavailable_feature_returns_na():
+def test_missing_stats_unavailable_feature_returns_zero():
     xml_content = _make_xml("glucose_level", [
         {"ts": "01-01-2018 08:00:00", "value": "100"},
     ])
     path = _write_temp_xml(xml_content)
     try:
         stats = OhioT1DMParser(path, "basis_gsr").missing_stats()
-        assert stats["actual"] == "NA"
-        assert stats["missing_pct"] == "NA"
+        assert stats["actual"] == 0
+        assert stats["expected"] == 0
+        assert stats["missing"] == 0
+        assert stats["missing_pct"] == 0.0
     finally:
         os.remove(path)
 

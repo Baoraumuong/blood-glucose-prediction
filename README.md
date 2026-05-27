@@ -44,6 +44,7 @@ bg_prediction/
 │   ├── models/
 │   │   ├── classical.py         # LR, SVR, XGBoost, DT, RF, KNN
 │   │   ├── arima_model.py       # Patient-wise ARIMA forecasting
+│   │   ├── sarimax_model.py     # Patient-wise SARIMAX/ARIMAX with exogenous features
 │   │   └── deep_learning.py     # LSTM & GRU (Keras)
 │   │
 │   ├── evaluation/
@@ -58,7 +59,7 @@ bg_prediction/
 ├── scripts/
 │   ├── run_classical.py         # Run all classical ML models
 │   ├── run_deep.py              # Run LSTM + GRU only
-│   ├── run_arima.py             # Run ARIMA only
+│   ├── run_arima.py             # Run ARIMA + SARIMAX only
 │   └── run_single_model.py      # Run any one model by short name
 │
 ├── notebooks/
@@ -125,7 +126,7 @@ python scripts/run_classical.py
 # Deep learning only
 python scripts/run_deep.py
 
-# ARIMA only
+# ARIMA baseline + SARIMAX with exogenous features
 python scripts/run_arima.py
 
 # A specific model
@@ -185,6 +186,10 @@ This replicates the strategy from the original exploratory notebook exactly:
 4. **Metrics:** RMSE (primary), MAE, R², MARD (Mean Absolute Relative Difference %).
 5. **Two feature conditions:** full features vs. glucose-only baseline.
 
+ARIMA is kept as the glucose-only baseline. SARIMAX/ARIMAX is the multivariate
+ARIMA-style model and uses the aligned engineered feature columns as exogenous
+inputs.
+
 ---
 
 ## Feature Engineering
@@ -192,18 +197,17 @@ This replicates the strategy from the original exploratory notebook exactly:
 | Feature | Description |
 |---|---|
 | `glucose_level` | CGM signal, Savitzky-Golay smoothed (window=11, poly=2); linear interpolation for gaps <=30 min |
-| `basis_gsr` | GSR wearable signal snapped to the nearest CGM timestamp, then forward/back-filled for model windows |
-| `basis_sleep` | Sleep wearable signal snapped to the nearest CGM timestamp, then forward/back-filled for model windows |
+| `basis_gsr` | GSR wearable signal snapped to the nearest CGM timestamp, then forward-filled for model windows |
+| `basis_sleep` | Sleep interval mask on the CGM grid; 1 while asleep, otherwise 0 |
 | `total_insulin` | Bolus dose + basal rate x 5 min / 60 (units per window); insulin events are snapped to the nearest CGM timestamp before aggregation |
 | `insulin_count` | Number of bolus events per 5-min window |
 | `insulin_3h_std` | Rolling 3-hour std of total insulin (variability indicator) |
-| `daily_exercise` | Cumulative exercise duration, reset at midnight |
+| `daily_exercise` | Binary flag: 1 for rows on a day with exercise, otherwise 0 |
 
 Features with very high missingness (`acceleration`, `basis_steps`,
-`basis_air_temperature`, `basis_skin_temperature`, `basis_heart_rate`) are excluded from
+`basis_air_temperature`, `basis_heart_rate`) are excluded from
 the engineered model input. Missingness reporting is limited to regularly checked signals
-configured in `dataset.missing_report_features`; unavailable feature data is reported as
-`NA`, not `0`.
+configured in `dataset.missing_report_features`.
 
 All non-CGM timestamps are rounded to the nearest `glucose_level` timestamp before
 windowing or correlation. Correlation diagnostics compare only rows that share the same

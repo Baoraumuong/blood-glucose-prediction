@@ -112,5 +112,4 @@ def run_arima(
 
     # ARIMA has no separate CV step – report test metrics in both slots
     store.add("ARIMA", "baseline",      cv_proxy, avg_metrics, preds_flat)
-    store.add("ARIMA", "with features", cv_proxy, avg_metrics, preds_flat)
     logger.info("ARIMA avg → RMSE=%.3f  R²=%.4f", avg_metrics["rmse"], avg_metrics["r2"])

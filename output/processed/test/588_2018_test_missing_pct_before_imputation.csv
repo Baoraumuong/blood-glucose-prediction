@@ -1,0 +1,11 @@
+feature,glucose_rows,missing,missing_pct_vs_glucose
+temp_basal,2880,0,0.0
+exercise,2880,0,0.0
+basis_sleep,2880,0,0.0
+basis_skin_temperature,2880,306,10.62
+basis_gsr,2880,312,10.83
+finger_stick,2880,2796,97.08
+bolus,2880,2840,98.61
+bolus_count,2880,2840,98.61
+meal,2880,2843,98.72
+basal,2880,2872,99.72

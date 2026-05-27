@@ -2,7 +2,7 @@
 """
 scripts/run_arima.py
 --------------------
-Run ARIMA model only.
+Run ARIMA and SARIMAX models only.
 
 Usage
 -----
@@ -22,7 +22,7 @@ args = parser.parse_args()
 cmd = [
     sys.executable, "main.py",
     "--config", args.config,
-    "--models", "arima",
+    "--models", "arima", "sarimax",
     "--skip-deep",
 ]
 if args.no_plots:

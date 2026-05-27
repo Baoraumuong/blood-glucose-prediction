@@ -46,6 +46,7 @@ from src.models.classical import (
     run_knn,
 )
 from src.models.arima_model import run_arima
+from src.models.sarimax_model import run_sarimax
 from src.models.deep_learning import run_lstm, run_gru
 
 
@@ -59,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--models", nargs="+",
-        choices=["lr", "svr", "xgb", "dt", "rf", "knn", "arima", "lstm", "gru"],
+        choices=["lr", "svr", "xgb", "dt", "rf", "knn", "arima", "sarimax", "lstm", "gru"],
         help="Run only the specified models (default: all enabled in config)",
     )
     parser.add_argument(
@@ -157,6 +158,9 @@ def main() -> None:
 
     if should_run("arima", "arima"):
         run_arima(train_masters, test_masters, store, cfg)
+
+    if should_run("sarimax", "sarimax"):
+        run_sarimax(train_masters, test_masters, store, cfg)
 
     if not args.skip_deep:
         if should_run("lstm", "lstm"):

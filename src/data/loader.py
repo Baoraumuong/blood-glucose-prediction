@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
 
-from src.data.parser import OhioT1DMParser
+from src.data.parser import OhioT1DMParser, _parse_ts
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,25 @@ HIGH_MISSING_FEATURES = {
     "acceleration",
     "basis_steps",
     "basis_air_temperature",
-    "basis_skin_temperature",
     "basis_heart_rate",
 }
-LOW_MISSING_SENSOR_FEATURES = ("basis_gsr", "basis_sleep")
+LOCF_FEATURES = ("basal", "basis_gsr", "finger_stick")
+ZERO_IMPUTE_FEATURES = (
+    "bolus",
+    "temp_basal",
+    "meal",
+    "exercise",
+    "basis_skin_temperature",
+    "basis_sleep",
+)
+POINT_VALUE_ATTRS = {
+    "bolus": "dose",
+    "meal": "carbs",
+    "finger_stick": "value",
+    "basal": "value",
+    "basis_gsr": "value",
+    "basis_skin_temperature": "value",
+}
 
 
 def _causal_savgol(series: pd.Series, window_length: int, polyorder: int) -> pd.Series:
@@ -82,6 +98,146 @@ def _align_to_glucose_index(
     else:
         aligned = aligned.groupby(level=0).mean()
     return aligned.reindex(glucose_index)
+
+
+def _empty_aligned(glucose_index: pd.DatetimeIndex, column_name: str) -> pd.DataFrame:
+    return pd.DataFrame({column_name: np.nan}, index=glucose_index)
+
+
+def _parse_events(xml_path: Path, feature: str) -> pd.DataFrame:
+    """Parse point and interval event metadata for one XML feature."""
+    columns = ["ts", "ts_begin", "ts_end", "value"]
+    try:
+        root = ET.parse(xml_path).getroot()
+    except ET.ParseError as exc:
+        logger.error("XML parse error for %s: %s", xml_path, exc)
+        return pd.DataFrame(columns=columns)
+
+    container = root.find(feature)
+    if container is None:
+        return pd.DataFrame(columns=columns)
+
+    records = []
+    for el in container:
+        ts = el.get("ts")
+        ts_begin = el.get("ts_begin") or el.get("tbegin")
+        ts_end = el.get("ts_end") or el.get("tend")
+
+        if feature == "basis_sleep":
+            value = 1
+        elif feature == "exercise":
+            ts_begin = ts_begin or ts
+            duration = pd.to_numeric(el.get("duration"), errors="coerce")
+            begin = _parse_ts(ts_begin) if ts_begin else None
+            if begin is not None and not pd.isna(duration):
+                ts_end = begin + pd.Timedelta(minutes=float(duration))
+            value = el.get("intensity") or 1
+        elif feature == "temp_basal":
+            value = el.get("value") or el.get("dose") or el.get("rate")
+        else:
+            value = el.get(POINT_VALUE_ATTRS.get(feature, "value"))
+
+        records.append({"ts": ts, "ts_begin": ts_begin, "ts_end": ts_end, "value": value})
+
+    df = pd.DataFrame(records, columns=columns)
+    if df.empty:
+        return df
+    for col in ["ts", "ts_begin", "ts_end"]:
+        df[col] = df[col].apply(_parse_ts)
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    return df.dropna(subset=["value"])
+
+
+def _align_point_feature(
+    xml_path: Path,
+    feature: str,
+    glucose_index: pd.DatetimeIndex,
+    column_name: str | None = None,
+    agg: str = "mean",
+) -> pd.DataFrame:
+    """Round point feature timestamps to the nearest glucose timestamp."""
+    column_name = column_name or feature
+    events = _parse_events(xml_path, feature)
+    if events.empty:
+        return _empty_aligned(glucose_index, column_name)
+
+    ts = events["ts"].where(events["ts"].notna(), events["ts_begin"])
+    valid = ts.notna()
+    if not valid.any():
+        return _empty_aligned(glucose_index, column_name)
+
+    df = events.loc[valid, ["value"]].copy()
+    df.index = pd.DatetimeIndex(ts.loc[valid])
+    return _align_to_glucose_index(df, glucose_index, column_name, agg=agg)
+
+
+def _align_interval_feature(
+    xml_path: Path,
+    feature: str,
+    glucose_index: pd.DatetimeIndex,
+    column_name: str | None = None,
+    default_value: float = 1.0,
+) -> pd.DataFrame:
+    """Apply begin/end events to every glucose timestamp they cover."""
+    column_name = column_name or feature
+    events = _parse_events(xml_path, feature)
+    out = pd.Series(0.0, index=glucose_index, name=column_name)
+    counts = pd.Series(0.0, index=glucose_index)
+    if events.empty:
+        return out.to_frame()
+
+    for _, row in events.iterrows():
+        begin = row["ts_begin"]
+        end = row["ts_end"]
+        if pd.isna(begin) or pd.isna(end):
+            continue
+        if end < begin:
+            begin, end = end, begin
+        value = row["value"] if not pd.isna(row["value"]) else default_value
+        mask = (glucose_index >= begin) & (glucose_index <= end)
+        out.loc[mask] += float(value)
+        counts.loc[mask] += 1
+
+    covered = counts > 0
+    out.loc[covered] = out.loc[covered] / counts.loc[covered]
+    return out.to_frame()
+
+
+def feature_missing_percentages(master: pd.DataFrame) -> pd.DataFrame:
+    """Missing percentage for aligned feature columns, with glucose rows as 100%."""
+    denom = len(master)
+    denom = max(denom, 1)
+    rows = []
+    for col in master.columns:
+        if col in {"glucose_level", "raw_glucose_level"}:
+            continue
+        missing = int(master[col].isna().sum())
+        rows.append(
+            {
+                "feature": col,
+                "glucose_rows": denom,
+                "missing": missing,
+                "missing_pct_vs_glucose": round(missing / denom * 100, 2),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("missing_pct_vs_glucose")
+
+
+def plot_feature_missing_percentages(missing_df: pd.DataFrame, save_path: str | Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plot_df = missing_df.sort_values("missing_pct_vs_glucose", ascending=True)
+    fig, ax = plt.subplots(figsize=(10, max(4, 0.35 * len(plot_df))))
+    ax.barh(plot_df["feature"], plot_df["missing_pct_vs_glucose"], color="#4c78a8")
+    ax.set_xlabel("Missing % compared with glucose rows")
+    ax.set_xlim(0, 100)
+    ax.set_title("Aligned Feature Missingness vs Glucose")
+    fig.tight_layout()
+    fig.savefig(save_path, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,7 +312,7 @@ def build_patient_master(
       - total_insulin      : bolus + basal dose in each 5-min window
       - insulin_count      : number of bolus events per window
       - insulin_3h_std     : 3-hour rolling std of total_insulin
-      - daily_exercise     : cumulative exercise duration, reset at midnight
+      - daily_exercise     : 1 for every row on a day with exercise, else 0
 
     Parameters
     ----------
@@ -199,53 +355,53 @@ def build_patient_master(
     gl = gl.drop(columns="value")
 
     # ── 2. Bolus insulin ─────────────────────────────────────────────────
-    bolus = OhioT1DMParser(xml_path, "bolus", resample_freq).make_dataframe()
-    if not bolus.empty:
-        bolus_sum = _align_to_glucose_index(bolus, gl.index, "dose_sum", agg="sum")
-        bolus_count = _align_to_glucose_index(bolus, gl.index, "dose_count", agg="count")
-        bolus = bolus_sum.join(bolus_count)
-    else:
-        bolus = pd.DataFrame(
-            {"dose_sum": 0.0, "dose_count": 0}, index=gl.index
-        )
+    bolus = _align_point_feature(xml_path, "bolus", gl.index, agg="sum")
+    bolus_count = _align_point_feature(xml_path, "bolus", gl.index, "bolus_count", agg="count")
 
     # ── 3. Basal insulin (rate × 5 min ÷ 60 → units) ────────────────────
-    basal = OhioT1DMParser(xml_path, "basal", resample_freq).make_dataframe()
-    if not basal.empty:
-        basal = _align_to_glucose_index(basal, gl.index, "basal_dose") * (5 / 60)
-    else:
-        basal = pd.DataFrame({"basal_dose": 0.0}, index=gl.index)
+    basal = _align_point_feature(xml_path, "basal", gl.index)
 
     # ── 4. Exercise duration ──────────────────────────────────────────────
-    exercise = OhioT1DMParser(xml_path, "exercise", resample_freq).make_dataframe()
-    if not exercise.empty:
-        exercise = _align_to_glucose_index(exercise, gl.index, "exercise", agg="sum")
-    else:
-        exercise = pd.DataFrame({"exercise": 0.0}, index=gl.index)
+    exercise = _align_interval_feature(xml_path, "exercise", gl.index)
 
     # ── 5. Wearable sensors retained after missingness screening ─────────
-    sensor_frames = []
-    for feature in LOW_MISSING_SENSOR_FEATURES:
-        sensor = OhioT1DMParser(xml_path, feature, resample_freq).make_dataframe()
-        sensor_frames.append(_align_to_glucose_index(sensor, gl.index, feature))
+    meal = _align_point_feature(xml_path, "meal", gl.index, agg="sum")
+    temp_basal = _align_interval_feature(xml_path, "temp_basal", gl.index)
+    basis_sleep = _align_interval_feature(xml_path, "basis_sleep", gl.index)
+    basis_gsr = _align_point_feature(xml_path, "basis_gsr", gl.index)
+    finger_stick = _align_point_feature(xml_path, "finger_stick", gl.index)
+    basis_skin_temperature = _align_point_feature(xml_path, "basis_skin_temperature", gl.index)
 
     # ── 6. Merge ──────────────────────────────────────────────────────────
-    master = gl.join(bolus[["dose_sum", "dose_count"]], how="left")
-    master = master.join(basal, how="left")
-    master = master.join(exercise, how="left")
-    for sensor in sensor_frames:
-        master = master.join(sensor, how="left")
-    raw_target = master["raw_glucose_level"]
-    event_cols = ["dose_sum", "dose_count", "basal_dose", "exercise"]
-    master[event_cols] = master[event_cols].fillna(0)
-    master[list(LOW_MISSING_SENSOR_FEATURES)] = (
-        master[list(LOW_MISSING_SENSOR_FEATURES)].ffill().bfill().fillna(0)
+    master = gl.join(
+        [
+            bolus,
+            bolus_count,
+            meal,
+            basal,
+            temp_basal,
+            exercise,
+            basis_gsr,
+            finger_stick,
+            basis_skin_temperature,
+            basis_sleep,
+        ],
+        how="left",
     )
+    master.attrs["missing_percentages_before_imputation"] = feature_missing_percentages(master)
+    raw_target = master["raw_glucose_level"]
+    zero_cols = [c for c in ZERO_IMPUTE_FEATURES if c in master.columns]
+    locf_cols = [c for c in LOCF_FEATURES if c in master.columns]
+    master[zero_cols] = master[zero_cols].fillna(0)
+    master[locf_cols] = master[locf_cols].ffill().fillna(0)
+    master["bolus_count"] = master["bolus_count"].fillna(0)
     master["raw_glucose_level"] = raw_target
 
     # ── 7. Engineered features ────────────────────────────────────────────
-    master["total_insulin"]  = master["dose_sum"] + master["basal_dose"]
-    master["insulin_count"]  = master["dose_count"]
+    master["total_insulin"] = (
+        master["bolus"] + master["basal"] * (5 / 60) + master["temp_basal"] * (5 / 60)
+    )
+    master["insulin_count"] = master["bolus_count"]
     master["insulin_3h_std"] = (
         master["total_insulin"]
         .rolling(rolling_insulin_window, min_periods=1)
@@ -253,9 +409,9 @@ def build_patient_master(
         .fillna(0)
     )
     master["daily_exercise"] = (
-        master["exercise"].groupby(master.index.date).cumsum()
+        master["exercise"].gt(0).groupby(master.index.date).transform("max").astype(int)
     )
-    master = master.drop(columns=["dose_sum", "dose_count", "basal_dose", "exercise"])
+    master = master.drop(columns=["bolus_count"])
     master = master.drop(columns=[c for c in HIGH_MISSING_FEATURES if c in master.columns])
     return master
 

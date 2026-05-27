@@ -27,6 +27,8 @@ _TS_FORMATS = (
 
 def _parse_ts(ts_str: str) -> Optional[datetime]:
     """Try each known timestamp format; return None on failure."""
+    if isinstance(ts_str, datetime):
+        return ts_str
     if not ts_str or pd.isna(ts_str):
         return None
     for fmt in _TS_FORMATS:
@@ -79,12 +81,10 @@ class OhioT1DMParser:
         """
         Return a dict with keys: actual, expected, missing, missing_pct.
         'expected' is derived from resampling the date-range at resample_freq.
-        Empty or unavailable features are reported as 'NA' instead of zero so
-        missingness summaries do not confuse absent data with complete data.
         """
         df = self.make_dataframe()
         if df.empty:
-            return dict(actual="NA", expected="NA", missing="NA", missing_pct="NA")
+            return dict(actual=0, expected=0, missing=0, missing_pct=0.0)
         if self.feature == "exercise":
             return dict(actual=len(df), expected=len(df), missing=0, missing_pct=0.0)
         df_r = df.resample(self.resample_freq).mean()

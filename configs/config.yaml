@@ -26,14 +26,11 @@ dataset:
     - basal
     - temp_basal
     - bolus
+    - meal
     - exercise
-    - basis_heart_rate
     - basis_gsr
     - basis_skin_temperature
-    - basis_air_temperature
-    - basis_steps
     - basis_sleep
-    - acceleration
 
   resample_freq: "5min"              # CGM sampling interval
 
@@ -63,7 +60,6 @@ feature_engineering:
     - acceleration
     - basis_steps
     - basis_air_temperature
-    - basis_skin_temperature
     - basis_heart_rate
 
 # ─── Evaluation ─────────────────────────────────────────────────────────────
@@ -116,6 +112,10 @@ models:
     weights: distance
 
   arima:
+    enabled: true
+    order: [2, 1, 2]
+
+  sarimax:
     enabled: true
     order: [2, 1, 2]
 
