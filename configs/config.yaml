@@ -1,18 +1,16 @@
-# =============================================================================
-# Blood Glucose Prediction – Master Configuration
+# Blood Glucose Prediction – Configuration
 # OhioT1DM Dataset
-# =============================================================================
 
-# ─── Paths ──────────────────────────────────────────────────────────────────
+# Paths
 paths:
-  data_dir: "src/data/OhioT1DM"          # root of extracted OhioT1DM dataset
+  data_dir: "src/data/OhioT1DM"          
   output_dir: "output"
   results_dir: "output/results"
   logs_dir: "output/logs"
   plots_dir: "output/plots"
   checkpoints_dir: "output/checkpoints"
 
-# ─── Dataset ────────────────────────────────────────────────────────────────
+# Dataset
 dataset:
   cohorts:
     "2018": [559, 563, 570, 575, 588, 591]
@@ -43,13 +41,13 @@ dataset:
     - basis_steps
     - glucose_level
 
-# ─── Time-series windows ────────────────────────────────────────────────────
+# Time-series windows
 window:
   lookback_minutes: 30               # history fed to model
   forecast_minutes: 30               # prediction horizon
   freq_minutes:     5                # minutes between CGM readings
 
-# ─── Feature engineering ────────────────────────────────────────────────────
+# Feature engineering
 feature_engineering:
   savgol_window:    11               # Savitzky-Golay smoothing window
   savgol_polyorder: 2
@@ -61,7 +59,7 @@ feature_engineering:
     - basis_air_temperature
     - basis_heart_rate
 
-# ─── Evaluation ─────────────────────────────────────────────────────────────
+# Evaluation
 evaluation:
   n_folds: 5
   kfold_shuffle: false               # preserve temporal order
@@ -73,7 +71,7 @@ evaluation:
     - r2
     - mard                           # mean absolute relative difference
 
-# ─── Classical ML models ────────────────────────────────────────────────────
+# Classical ML models
 models:
   linear_regression:
     enabled: true
@@ -118,7 +116,7 @@ models:
     enabled: true
     order: [2, 1, 2]
 
-# ─── Deep learning ──────────────────────────────────────────────────────────
+# Deep learning
 deep_learning:
   epochs: 60
   batch_size: 256
@@ -142,10 +140,10 @@ deep_learning:
     dropout: 0.2
     dense_units: 32
 
-# ─── Reproducibility ────────────────────────────────────────────────────────
+# Reproducibility
 seed: 42
 
-# ─── Logging ────────────────────────────────────────────────────────────────
+# Logging
 logging:
   level: INFO                        # DEBUG | INFO | WARNING | ERROR
   log_to_file: true
