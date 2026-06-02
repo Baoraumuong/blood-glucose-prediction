@@ -29,7 +29,6 @@ HIGH_MISSING_FEATURES = {
 LOCF_FEATURES = ("basal", "basis_gsr", "finger_stick")
 ZERO_IMPUTE_FEATURES = (
     "bolus",
-    "temp_basal",
     "meal",
     "exercise",
     "basis_skin_temperature",
@@ -238,13 +237,26 @@ def _align_interval_feature(
     return out.to_frame()
 
 
+def _apply_temp_basal_override(master: pd.DataFrame) -> pd.DataFrame:
+    """Fold temporary basal overrides into the effective basal rate."""
+    if "temp_basal" not in master.columns:
+        return master
+
+    master["temp_basal"] = master["temp_basal"].fillna(0)
+    temp_override = master["temp_basal"].ne(0)
+    master.loc[temp_override, "basal"] = master.loc[temp_override, "temp_basal"]
+    if {"bolus", "basal"}.issubset(master.columns):
+        master["total_insulin"] = master["bolus"] + master["basal"] * (5 / 60)
+    return master.drop(columns=["temp_basal"])
+
+
 def feature_missing_percentages(master: pd.DataFrame) -> pd.DataFrame:
     """Missing percentage for aligned feature columns, with glucose rows as 100%."""
     denom = len(master)
     denom = max(denom, 1)
     rows = []
     for col in master.columns:
-        if col in {"glucose_level", "raw_glucose_level"}:
+        if col in {"glucose_level", "raw_glucose_level", "temp_basal"}:
             continue
         missing = int(master[col].isna().sum())
         rows.append(
@@ -389,13 +401,13 @@ def build_patient_master(
 
     # ── 3. Basal insulin (rate × 5 min ÷ 60 → units) ────────────────────
     basal = _align_point_feature(xml_path, "basal", gl.index)
+    temp_basal = _align_interval_feature(xml_path, "temp_basal", gl.index)
 
     # ── 4. Exercise duration ──────────────────────────────────────────────
     exercise = _align_interval_feature(xml_path, "exercise", gl.index)
 
     # ── 5. Wearable sensors retained after missingness screening ─────────
     meal = _align_point_feature(xml_path, "meal", gl.index, agg="sum")
-    temp_basal = _align_interval_feature(xml_path, "temp_basal", gl.index)
     basis_sleep = _align_interval_feature(xml_path, "basis_sleep", gl.index)
     basis_gsr = _align_point_feature(xml_path, "basis_gsr", gl.index)
     finger_stick = _align_point_feature(xml_path, "finger_stick", gl.index)
@@ -423,13 +435,12 @@ def build_patient_master(
     locf_cols = [c for c in LOCF_FEATURES if c in master.columns]
     master[zero_cols] = master[zero_cols].fillna(0)
     master[locf_cols] = master[locf_cols].ffill().fillna(0)
+    master = _apply_temp_basal_override(master)
     master["bolus_count"] = master["bolus_count"].fillna(0)
     master["raw_glucose_level"] = raw_target
 
     # ── 7. Engineered features ────────────────────────────────────────────
-    master["total_insulin"] = (
-        master["bolus"] + master["basal"] * (5 / 60) + master["temp_basal"] * (5 / 60)
-    )
+    master["total_insulin"] = master["bolus"] + master["basal"] * (5 / 60)
     master["insulin_count"] = master["bolus_count"]
     master["insulin_3h_std"] = (
         master["total_insulin"]
@@ -512,6 +523,7 @@ def load_master_dataframes(
                 window_length=savgol_window,
                 polyorder=savgol_polyorder,
             )
+        df = _apply_temp_basal_override(df)
         masters[patient_key] = df.sort_index()
     return masters
 

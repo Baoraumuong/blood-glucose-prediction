@@ -24,7 +24,6 @@ dataset:
     - glucose_level
     - finger_stick
     - basal
-    - temp_basal
     - bolus
     - meal
     - exercise
