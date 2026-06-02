@@ -14,6 +14,7 @@ import pandas as pd
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from src.evaluation.metrics import ResultStore, compute_all_metrics
+from src.models.time_series_utils import fill_series_gaps, is_finite_window
 
 logger = logging.getLogger(__name__)
 
@@ -28,31 +29,44 @@ def _arima_patient_forecast(
     Fit ARIMA on smoothed training series, then generate non-overlapping
     n_forecast-step-ahead windows over the test set.
     """
-    train_smooth = train_series.ewm(span=5, adjust=False).mean()
+    train_model = fill_series_gaps(train_series)
+    test_model = fill_series_gaps(test_series)
+    if train_model.empty or test_model.empty:
+        return None, None
+
+    train_smooth = train_model.ewm(span=5, adjust=False).mean()
 
     try:
         fit = SARIMAX(
             train_smooth, order=order,
             enforce_stationarity=False,
             enforce_invertibility=False,
+            missing="none",
         ).fit(disp=False)
     except Exception as exc:
         logger.warning("ARIMA fit failed: %s", exc)
         return None, None
 
-    all_series = pd.concat([train_smooth, test_series])
+    all_model_series = pd.concat([train_smooth, test_model])
+    all_actual_series = pd.concat([train_model, pd.to_numeric(test_series, errors="coerce")])
     preds_list, actuals_list = [], []
     n_train = len(train_smooth)
-    n_test  = len(test_series)
+    n_test = min(len(test_model), len(test_series))
 
     for i in range(0, n_test - n_forecast + 1, n_forecast):
         start  = n_train + i
-        actual = all_series.iloc[start : start + n_forecast].values
+        actual = all_actual_series.iloc[start : start + n_forecast].values
         if len(actual) < n_forecast:
             break
+        if not is_finite_window(actual):
+            logger.debug("ARIMA window %d skipped because actuals contain NaN/inf", i)
+            continue
         try:
-            history = all_series.iloc[:start]
+            history = all_model_series.iloc[:start]
             fc = fit.apply(history, refit=False).forecast(n_forecast)
+            if not is_finite_window(fc.values):
+                logger.debug("ARIMA window %d skipped because predictions contain NaN/inf", i)
+                continue
             preds_list.append(fc.values)
             actuals_list.append(actual)
         except Exception as exc:
