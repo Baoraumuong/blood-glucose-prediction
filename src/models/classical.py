@@ -95,6 +95,29 @@ def _log_top_feature_importances(
     logger.info("Top %d features for %s (%s): %s", top_n, name, feature_tag, formatted)
 
 
+def _iter_classical_variants(datasets: dict[str, Any]) -> list[dict[str, Any]]:
+    if "classical_variants" in datasets:
+        return datasets["classical_variants"]
+    return [
+        dict(
+            tag="with features",
+            X_train_2d=datasets["X_train_2d_full_s"],
+            X_test_2d=datasets["X_test_2d_full_s"],
+            y_train=datasets["y_train"],
+            y_test=datasets["y_test"],
+            flat_feature_names=datasets["full_flat_feature_names"],
+        ),
+        dict(
+            tag="baseline",
+            X_train_2d=datasets["X_train_2d_base_s"],
+            X_test_2d=datasets["X_test_2d_base_s"],
+            y_train=datasets["y_train_base"],
+            y_test=datasets["y_test_base"],
+            flat_feature_names=datasets["base_flat_feature_names"],
+        ),
+    ]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Individual model runners
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,20 +130,12 @@ def run_linear_regression(
     eval_cfg = cfg.get("evaluation", {})
     n_folds  = eval_cfg.get("n_folds", 5)
 
-    for tag, Xtr, Xte, ytr, yte in [
-        ("with features", datasets["X_train_2d_full_s"], datasets["X_test_2d_full_s"],
-         datasets["y_train"], datasets["y_test"]),
-        ("baseline",      datasets["X_train_2d_base_s"], datasets["X_test_2d_base_s"],
-         datasets["y_train_base"], datasets["y_test_base"]),
-    ]:
-        feature_names = (
-            datasets["full_flat_feature_names"]
-            if tag == "with features"
-            else datasets["base_flat_feature_names"]
-        )
+    for variant in _iter_classical_variants(datasets):
+        tag = variant["tag"]
         _run_model(LinearRegression(), "LinearRegression", tag,
-                   Xtr, ytr, Xte, yte, store, n_folds,
-                   feature_names=feature_names)
+                   variant["X_train_2d"], variant["y_train"],
+                   variant["X_test_2d"], variant["y_test"], store, n_folds,
+                   feature_names=variant["flat_feature_names"])
 
 
 def run_svr(
@@ -143,22 +158,15 @@ def run_svr(
         shrinking=model_cfg.get("shrinking", True),
     )
 
-    for tag, Xtr, Xte, ytr, yte in [
-        ("with features", datasets["X_train_2d_full_s"], datasets["X_test_2d_full_s"],
-         datasets["y_train"], datasets["y_test"]),
-        ("baseline",      datasets["X_train_2d_base_s"], datasets["X_test_2d_base_s"],
-         datasets["y_train_base"], datasets["y_test_base"]),
-    ]:
+    for variant in _iter_classical_variants(datasets):
+        tag = variant["tag"]
         model = MultiOutputRegressor(base_svr, n_jobs=-1)
-        feature_names = (
-            datasets["full_flat_feature_names"]
-            if tag == "with features"
-            else datasets["base_flat_feature_names"]
-        )
-        _run_model(model, "SVR", tag, Xtr, ytr, Xte, yte, store,
+        _run_model(model, "SVR", tag,
+                   variant["X_train_2d"], variant["y_train"],
+                   variant["X_test_2d"], variant["y_test"], store,
                    n_folds, svr_subsample=subsample,
                    train_subsample=train_subsample, seed=seed,
-                   feature_names=feature_names)
+                   feature_names=variant["flat_feature_names"])
 
 
 def run_xgboost(
@@ -182,20 +190,13 @@ def run_xgboost(
         n_jobs=-1,
     )
 
-    for tag, Xtr, Xte, ytr, yte in [
-        ("with features", datasets["X_train_2d_full_s"], datasets["X_test_2d_full_s"],
-         datasets["y_train"], datasets["y_test"]),
-        ("baseline",      datasets["X_train_2d_base_s"], datasets["X_test_2d_base_s"],
-         datasets["y_train_base"], datasets["y_test_base"]),
-    ]:
+    for variant in _iter_classical_variants(datasets):
+        tag = variant["tag"]
         model = MultiOutputRegressor(base_xgb, n_jobs=-1)
-        feature_names = (
-            datasets["full_flat_feature_names"]
-            if tag == "with features"
-            else datasets["base_flat_feature_names"]
-        )
-        _run_model(model, "XGBoost", tag, Xtr, ytr, Xte, yte, store, n_folds,
-                   feature_names=feature_names)
+        _run_model(model, "XGBoost", tag,
+                   variant["X_train_2d"], variant["y_train"],
+                   variant["X_test_2d"], variant["y_test"], store, n_folds,
+                   feature_names=variant["flat_feature_names"])
 
 
 def run_decision_tree(
@@ -208,24 +209,17 @@ def run_decision_tree(
     n_folds   = eval_cfg.get("n_folds", 5)
     seed      = cfg.get("seed", 42)
 
-    for tag, Xtr, Xte, ytr, yte in [
-        ("with features", datasets["X_train_2d_full_s"], datasets["X_test_2d_full_s"],
-         datasets["y_train"], datasets["y_test"]),
-        ("baseline",      datasets["X_train_2d_base_s"], datasets["X_test_2d_base_s"],
-         datasets["y_train_base"], datasets["y_test_base"]),
-    ]:
+    for variant in _iter_classical_variants(datasets):
+        tag = variant["tag"]
         model = DecisionTreeRegressor(
             max_depth=model_cfg.get("max_depth", 8),
             min_samples_leaf=model_cfg.get("min_samples_leaf", 10),
             random_state=seed,
         )
-        feature_names = (
-            datasets["full_flat_feature_names"]
-            if tag == "with features"
-            else datasets["base_flat_feature_names"]
-        )
-        _run_model(model, "DecisionTree", tag, Xtr, ytr, Xte, yte, store, n_folds,
-                   feature_names=feature_names)
+        _run_model(model, "DecisionTree", tag,
+                   variant["X_train_2d"], variant["y_train"],
+                   variant["X_test_2d"], variant["y_test"], store, n_folds,
+                   feature_names=variant["flat_feature_names"])
 
 
 def run_random_forest(
@@ -238,12 +232,8 @@ def run_random_forest(
     n_folds   = eval_cfg.get("n_folds", 5)
     seed      = cfg.get("seed", 42)
 
-    for tag, Xtr, Xte, ytr, yte in [
-        ("with features", datasets["X_train_2d_full_s"], datasets["X_test_2d_full_s"],
-         datasets["y_train"], datasets["y_test"]),
-        ("baseline",      datasets["X_train_2d_base_s"], datasets["X_test_2d_base_s"],
-         datasets["y_train_base"], datasets["y_test_base"]),
-    ]:
+    for variant in _iter_classical_variants(datasets):
+        tag = variant["tag"]
         model = RandomForestRegressor(
             n_estimators=model_cfg.get("n_estimators", 200),
             max_depth=model_cfg.get("max_depth", 10),
@@ -251,13 +241,10 @@ def run_random_forest(
             n_jobs=-1,
             random_state=seed,
         )
-        feature_names = (
-            datasets["full_flat_feature_names"]
-            if tag == "with features"
-            else datasets["base_flat_feature_names"]
-        )
-        _run_model(model, "RandomForest", tag, Xtr, ytr, Xte, yte, store, n_folds,
-                   feature_names=feature_names)
+        _run_model(model, "RandomForest", tag,
+                   variant["X_train_2d"], variant["y_train"],
+                   variant["X_test_2d"], variant["y_test"], store, n_folds,
+                   feature_names=variant["flat_feature_names"])
 
 
 def run_knn(
@@ -269,21 +256,14 @@ def run_knn(
     model_cfg = cfg["models"].get("knn", {})
     n_folds   = eval_cfg.get("n_folds", 5)
 
-    for tag, Xtr, Xte, ytr, yte in [
-        ("with features", datasets["X_train_2d_full_s"], datasets["X_test_2d_full_s"],
-         datasets["y_train"], datasets["y_test"]),
-        ("baseline",      datasets["X_train_2d_base_s"], datasets["X_test_2d_base_s"],
-         datasets["y_train_base"], datasets["y_test_base"]),
-    ]:
+    for variant in _iter_classical_variants(datasets):
+        tag = variant["tag"]
         model = KNeighborsRegressor(
             n_neighbors=model_cfg.get("n_neighbors", 10),
             weights=model_cfg.get("weights", "distance"),
             n_jobs=-1,
         )
-        feature_names = (
-            datasets["full_flat_feature_names"]
-            if tag == "with features"
-            else datasets["base_flat_feature_names"]
-        )
-        _run_model(model, "KNN", tag, Xtr, ytr, Xte, yte, store, n_folds,
-                   feature_names=feature_names)
+        _run_model(model, "KNN", tag,
+                   variant["X_train_2d"], variant["y_train"],
+                   variant["X_test_2d"], variant["y_test"], store, n_folds,
+                   feature_names=variant["flat_feature_names"])

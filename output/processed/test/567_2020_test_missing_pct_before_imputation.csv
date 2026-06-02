@@ -2,8 +2,8 @@ feature,glucose_rows,missing,missing_pct_vs_glucose
 temp_basal,2870,0,0.0
 exercise,2870,0,0.0
 basis_sleep,2870,0,0.0
-basis_gsr,2870,957,33.34
-basis_skin_temperature,2870,957,33.34
+basis_gsr,2870,961,33.48
+basis_skin_temperature,2870,961,33.48
 finger_stick,2870,2792,97.28
 bolus,2870,2816,98.12
 bolus_count,2870,2816,98.12

@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 from src.utils.config_loader import load_config, get_window_params
 from src.utils.logger import get_logger
 from src.utils.seed import set_global_seed
-from src.data.loader import find_xml_files, build_all_masters
+from src.data.loader import find_xml_files, build_all_masters, load_master_dataframes
 from src.features.windowing import prepare_datasets
 from src.evaluation.metrics import ResultStore
 from src.evaluation.visualizer import (
@@ -71,6 +71,15 @@ def parse_args() -> argparse.Namespace:
         "--no-plots", action="store_true",
         help="Skip generating plots",
     )
+    parser.add_argument(
+        "--masters-dir",
+        help="Directory containing exported train/test master CSVs (default: paths.processed_dir or output/processed)",
+    )
+    parser.add_argument(
+        "--rebuild-masters",
+        action="store_true",
+        help="Rebuild patient master DataFrames from XML instead of loading exported CSVs",
+    )
     return parser.parse_args()
 
 
@@ -108,9 +117,52 @@ def main() -> None:
         ds_cfg.get("test_suffix",  "-ws-testing.xml"),
     )
 
-    logger.info("[1/5] Building patient master DataFrames …")
-    train_masters = build_all_masters(train_files, cfg)
-    test_masters  = build_all_masters(test_files,  cfg)
+    processed_dir = Path(
+        args.masters_dir
+        or cfg["paths"].get("processed_dir")
+        or Path(cfg["paths"].get("output_dir", "output")) / "processed"
+    )
+    expected_keys = {
+        f"{pid}_{year}"
+        for year, patient_ids in ds_cfg["cohorts"].items()
+        for pid in patient_ids
+    }
+    expected_train = expected_keys
+    expected_test = expected_keys
+    train_masters = {}
+    test_masters = {}
+
+    if not args.rebuild_masters:
+        logger.info("[1/5] Loading patient master DataFrames from %s ...", processed_dir)
+        fe_cfg = cfg.get("feature_engineering", {})
+        train_masters = load_master_dataframes(
+            "train",
+            processed_dir,
+            savgol_window=fe_cfg.get("savgol_window", 11),
+            savgol_polyorder=fe_cfg.get("savgol_polyorder", 2),
+        )
+        test_masters = load_master_dataframes(
+            "test",
+            processed_dir,
+            savgol_window=fe_cfg.get("savgol_window", 11),
+            savgol_polyorder=fe_cfg.get("savgol_polyorder", 2),
+        )
+
+        missing_train = expected_train - set(train_masters)
+        missing_test = expected_test - set(test_masters)
+        if missing_train or missing_test:
+            logger.warning(
+                "Cached master DataFrames are incomplete (missing train=%s, test=%s). Rebuilding from XML.",
+                sorted(missing_train),
+                sorted(missing_test),
+            )
+            train_masters = {}
+            test_masters = {}
+
+    if args.rebuild_masters or not train_masters or not test_masters:
+        logger.info("[1/5] Building patient master DataFrames from XML ...")
+        train_masters = build_all_masters(train_files, cfg)
+        test_masters  = build_all_masters(test_files,  cfg)
 
     if not train_masters:
         logger.error("No training data loaded. Check data_dir in config.")
@@ -120,6 +172,11 @@ def main() -> None:
     logger.info("[2/5] Preparing windowed datasets …")
     datasets = prepare_datasets(train_masters, test_masters, cfg)
     lb_steps, fc_steps, freq = get_window_params(cfg)
+    logger.info(
+        "[2/5] Windowed datasets ready: train_windows=%d, test_windows=%d",
+        len(datasets["y_train"]),
+        len(datasets["y_test"]),
+    )
 
     # ── 3. Model training & evaluation ───────────────────────────────────
     logger.info("[3/5] Training models …")

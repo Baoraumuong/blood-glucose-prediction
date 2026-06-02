@@ -46,6 +46,7 @@ def get_logger(
 
     numeric_level = getattr(logging, level.upper(), logging.INFO)
     logger.setLevel(numeric_level)
+    logger.propagate = False
 
     fmt = logging.Formatter(
         fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -57,6 +58,10 @@ def get_logger(
     ch.setLevel(numeric_level)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(numeric_level)
+    if not root_logger.handlers:
+        root_logger.addHandler(ch)
 
     # ── File handler ─────────────────────────────────────────────────────
     if log_to_file:
@@ -67,5 +72,6 @@ def get_logger(
         fh.setLevel(numeric_level)
         fh.setFormatter(fmt)
         logger.addHandler(fh)
+        root_logger.addHandler(fh)
 
     return logger

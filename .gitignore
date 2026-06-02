@@ -19,6 +19,7 @@ output/logs/
 output/results/
 output/plots/
 output/checkpoints/
+output/processed/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -36,3 +37,4 @@ Thumbs.db
 .pytest_cache/
 
 tests/
+

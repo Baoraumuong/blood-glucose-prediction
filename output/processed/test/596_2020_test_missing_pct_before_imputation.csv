@@ -2,8 +2,8 @@ feature,glucose_rows,missing,missing_pct_vs_glucose
 temp_basal,3002,0,0.0
 exercise,3002,0,0.0
 basis_sleep,3002,0,0.0
-basis_gsr,3002,1135,37.81
-basis_skin_temperature,3002,1135,37.81
+basis_gsr,3002,1136,37.84
+basis_skin_temperature,3002,1136,37.84
 meal,3002,2948,98.2
 bolus,3002,2964,98.73
 bolus_count,3002,2964,98.73

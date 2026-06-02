@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.data.loader import build_all_masters, find_xml_files  # noqa: E402
+from src.data.loader import build_all_masters, find_xml_files, save_master_dataframes  # noqa: E402
 from src.utils.config_loader import load_config  # noqa: E402
 
 
@@ -40,16 +40,11 @@ def _export_split(
     masters: dict[str, object],
     output_dir: Path,
 ) -> None:
-    split_dir = output_dir / split_name
-    split_dir.mkdir(parents=True, exist_ok=True)
+    save_master_dataframes(split_name, masters, output_dir)
 
     for patient_key, df in sorted(masters.items()):
         if df.empty:
             continue
-
-        base = f"{patient_key}_{split_name}"
-        df.to_csv(split_dir / f"{base}_master.csv", index_label="ts")
-
         print(f"{split_name}/{patient_key}: rows={len(df)} cols={len(df.columns)}")
 
 

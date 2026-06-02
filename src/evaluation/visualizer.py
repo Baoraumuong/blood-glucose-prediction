@@ -89,7 +89,8 @@ def plot_rmse_r2_bars(
     """Grouped bar charts: CV RMSE, Test RMSE, CV R², Test R²."""
     model_names = res_df["model"].unique()
     x     = np.arange(len(model_names))
-    width = 0.35
+    feature_tags = list(res_df["features"].unique())
+    width = 0.8 / max(len(feature_tags), 1)
     fig, axes = plt.subplots(2, 2, figsize=(18, 10))
 
     for ax, metric, ylabel, title, cmap in [
@@ -98,12 +99,16 @@ def plot_rmse_r2_bars(
         (axes[1, 0], "cv_r2",     "R²",            "CV R²",     ("seagreen",  "salmon")),
         (axes[1, 1], "test_r2",   "R²",            "Test R²",   ("seagreen",  "salmon")),
     ]:
-        sub_f = res_df[res_df.features == "with features"].set_index("model")
-        sub_b = res_df[res_df.features == "baseline"].set_index("model")
-        vals_f = [sub_f.loc[m, metric] if m in sub_f.index else 0 for m in model_names]
-        vals_b = [sub_b.loc[m, metric] if m in sub_b.index else 0 for m in model_names]
-        ax.bar(x - width / 2, vals_f, width, label="With Features", color=cmap[0], alpha=0.85)
-        ax.bar(x + width / 2, vals_b, width, label="Baseline (GL only)", color=cmap[1], alpha=0.85)
+        for i, tag in enumerate(feature_tags):
+            sub = res_df[res_df.features == tag].set_index("model")
+            vals = [
+                sub.loc[m, metric]
+                if metric in sub.columns and m in sub.index
+                else 0
+                for m in model_names
+            ]
+            offset = (i - (len(feature_tags) - 1) / 2) * width
+            ax.bar(x + offset, vals, width, label=tag, alpha=0.85)
         ax.set_xticks(x)
         ax.set_xticklabels(model_names, rotation=30, ha="right")
         ax.set_ylabel(ylabel)
@@ -123,16 +128,30 @@ def plot_feature_impact(
     """Δ RMSE and Δ R² bars (with features − baseline)."""
     records = []
     for m in res_df["model"].unique():
-        sf = res_df[(res_df.model == m) & (res_df.features == "with features")]
-        sb = res_df[(res_df.model == m) & (res_df.features == "baseline")]
-        if sf.empty or sb.empty:
-            continue
-        records.append(dict(
-            model=m,
-            delta_rmse=sf["test_rmse"].iloc[0] - sb["test_rmse"].iloc[0],
-            delta_r2=  sf["test_r2"].iloc[0]   - sb["test_r2"].iloc[0],
-        ))
-    delta_df = pd.DataFrame(records).sort_values("delta_rmse")
+        model_df = res_df[res_df.model == m]
+        smoothings = {
+            tag.replace("with features + ", "")
+            for tag in model_df["features"]
+            if tag.startswith("with features + ")
+        } or {""}
+        for smoothing in smoothings:
+            with_tag = f"with features + {smoothing}" if smoothing else "with features"
+            base_tag = f"baseline + {smoothing}" if smoothing else "baseline"
+            sf = model_df[model_df.features == with_tag]
+            sb = model_df[model_df.features == base_tag]
+            if sf.empty or sb.empty:
+                continue
+            label = f"{m} ({smoothing})" if smoothing else m
+            records.append(dict(
+                model=label,
+                delta_rmse=sf["test_rmse"].iloc[0] - sb["test_rmse"].iloc[0],
+                delta_r2=sf["test_r2"].iloc[0] - sb["test_r2"].iloc[0],
+            ))
+    delta_df = pd.DataFrame(records)
+    if delta_df.empty:
+        logger.warning("Feature-impact plot skipped: no matched feature/baseline rows")
+        return plt.figure()
+    delta_df = delta_df.sort_values("delta_rmse")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     c_rmse = ["seagreen" if v < 0 else "tomato" for v in delta_df["delta_rmse"]]
@@ -159,9 +178,13 @@ def plot_best_model_predictions(
     save_path: str | None = None,
 ) -> plt.Figure:
     """Time-series and scatter plot for the best model on the 30-min horizon."""
-    best = res_df[res_df.features == "with features"].sort_values("test_rmse").iloc[0]
+    candidate_df = res_df[res_df.features.str.startswith("with features")]
+    if candidate_df.empty:
+        candidate_df = res_df
+    best = candidate_df.sort_values("test_rmse").iloc[0]
     name = best["model"]
-    preds = result_store.get_predictions(name, "with features")
+    feature_tag = best["features"]
+    preds = result_store.get_predictions(name, feature_tag)
     if preds is None:
         logger.warning("No predictions found for %s", name)
         return plt.figure()
@@ -208,7 +231,8 @@ def plot_horizon_rmse(
     fig, ax = plt.subplots(figsize=(10, 5))
 
     for model_name in ["LSTM", "GRU"]:
-        for tag in ["with features", "baseline"]:
+        tags = res_df.loc[res_df.model == model_name, "features"].tolist()
+        for tag in tags:
             preds = result_store.get_predictions(model_name, tag)
             if preds is None:
                 continue
@@ -216,7 +240,7 @@ def plot_horizon_rmse(
                 np.sqrt(mean_squared_error(y_test[:, s], preds[: len(y_test), s]))
                 for s in range(forecast_steps)
             ]
-            ls = "-" if tag == "with features" else "--"
+            ls = "-" if tag.startswith("with features") else "--"
             ax.plot(labels, rmse_steps, marker="o", ls=ls, label=f"{model_name} ({tag})")
 
     ax.set_title("RMSE vs Forecast Horizon – LSTM & GRU", fontsize=12)

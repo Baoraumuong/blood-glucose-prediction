@@ -139,10 +139,17 @@ class ResultStore:
         predictions: np.ndarray,
     ) -> None:
         key = f"{model_name} ({feature_tag})"
+        normalized_cv_metrics = {
+            metric_name if metric_name.startswith("cv_") else f"cv_{metric_name}": round(
+                value,
+                4,
+            )
+            for metric_name, value in cv_metrics.items()
+        }
         record = dict(
             model=model_name,
             features=feature_tag,
-            **{f"cv_{k}":   round(v, 4) for k, v in cv_metrics.items()},
+            **normalized_cv_metrics,
             **{f"test_{k}": round(v, 4) for k, v in test_metrics.items()},
         )
         self._records.append(record)

@@ -36,6 +36,29 @@ def flatten_feature_names(feature_cols: list[str], lookback_steps: int) -> list[
     ]
 
 
+def _replace_glucose_input(
+    masters: dict[str, pd.DataFrame],
+    use_savgol: bool,
+) -> dict[str, pd.DataFrame]:
+    """Return masters with glucose_level set to smoothed or raw CGM input."""
+    if use_savgol:
+        return masters
+
+    out: dict[str, pd.DataFrame] = {}
+    for key, df in masters.items():
+        df_raw = df.copy()
+        if RAW_TARGET_COL in df_raw.columns:
+            df_raw[TARGET_COL] = df_raw[RAW_TARGET_COL]
+        out[key] = df_raw
+    return out
+
+
+def _display_feature_cols(feature_cols: list[str], use_savgol: bool) -> list[str]:
+    if use_savgol:
+        return feature_cols
+    return [RAW_TARGET_COL if c == TARGET_COL else c for c in feature_cols]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core windowing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -46,6 +69,7 @@ def create_multistep_dataset(
     lookback_steps: int = 6,
     forecast_steps: int = 6,
     feature_cols: list[str] | None = None,
+    freq_minutes: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate sliding-window arrays preserving temporal order.
@@ -63,6 +87,9 @@ def create_multistep_dataset(
         Number of past steps fed to the model.
     forecast_steps : int
         Number of future steps to predict.
+    freq_minutes : int | None
+        Required spacing between consecutive timestamps. When provided for a
+        DatetimeIndex, windows crossing a timestamp gap are rejected.
 
     Returns
     -------
@@ -74,9 +101,19 @@ def create_multistep_dataset(
 
     feature_data = df[feature_cols].values.astype(np.float32)
     target_data = df[target_col].values.astype(np.float32)
+    expected_delta = (
+        pd.Timedelta(minutes=freq_minutes)
+        if freq_minutes is not None and isinstance(df.index, pd.DatetimeIndex)
+        else None
+    )
     X, y = [], []
 
     for i in range(len(df) - lookback_steps - forecast_steps + 1):
+        if expected_delta is not None:
+            window_index = df.index[i : i + lookback_steps + forecast_steps]
+            if not window_index.to_series().diff().iloc[1:].eq(expected_delta).all():
+                continue
+
         x_window = feature_data[i : i + lookback_steps, :]
         y_window = target_data[i + lookback_steps : i + lookback_steps + forecast_steps]
         if np.isnan(x_window).any() or np.isnan(y_window).any():
@@ -99,6 +136,7 @@ def build_global_dataset(
     forecast_steps: int = 6,
     target_col: str = TARGET_COL,
     feature_cols: list[str] | None = None,
+    freq_minutes: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Concatenate windows from all patients without cross-patient contamination.
@@ -113,6 +151,8 @@ def build_global_dataset(
         Prediction target column name.
     feature_cols : list[str] | None
         Input columns to include in X.
+    freq_minutes : int | None
+        Required spacing between consecutive timestamps.
 
     Returns
     -------
@@ -132,6 +172,7 @@ def build_global_dataset(
             lookback_steps=lookback_steps,
             forecast_steps=forecast_steps,
             feature_cols=feature_cols,
+            freq_minutes=freq_minutes,
         )
         if len(Xp) == 0:
             logger.warning("Skipping %s: no complete target windows", pid)
@@ -279,74 +320,96 @@ def prepare_datasets(
     if excluded:
         logger.info("Excluded high-missing features: %s", sorted(excluded))
 
-    X_train_full, y_train = build_global_dataset(
-        train_masters,
-        lb_steps,
-        fc_steps,
-        target_col=target_col,
-        feature_cols=full_feature_cols,
-    )
-    X_test_full,  y_test  = build_global_dataset(
-        test_masters,
-        lb_steps,
-        fc_steps,
-        target_col=target_col,
-        feature_cols=full_feature_cols,
-    )
+    base_feature_cols = [TARGET_COL]
+    variants: list[dict[str, Any]] = []
 
-    # ── Glucose-only baseline ─────────────────────────────────────────────
-    X_train_base, y_train_base = build_global_dataset(
-        train_masters,
-        lb_steps,
-        fc_steps,
-        target_col=target_col,
-        feature_cols=[TARGET_COL],
-    )
-    X_test_base,  y_test_base  = build_global_dataset(
-        test_masters,
-        lb_steps,
-        fc_steps,
-        target_col=target_col,
-        feature_cols=[TARGET_COL],
-    )
+    for use_savgol, smoothing_label in [
+        (True, "Savitzky-Golay"),
+        (False, "no Savitzky-Golay"),
+    ]:
+        variant_train = _replace_glucose_input(train_masters, use_savgol)
+        variant_test = _replace_glucose_input(test_masters, use_savgol)
 
-    logger.info(
-        "Dataset shapes – full: X_train=%s, baseline: X_train=%s",
-        X_train_full.shape,
-        X_train_base.shape,
-    )
+        for feature_label, feature_cols in [
+            ("with features", full_feature_cols),
+            ("baseline", base_feature_cols),
+        ]:
+            tag = f"{feature_label} + {smoothing_label}"
+            X_train, y_train = build_global_dataset(
+                variant_train,
+                lb_steps,
+                fc_steps,
+                target_col=target_col,
+                feature_cols=feature_cols,
+                freq_minutes=w["freq_minutes"],
+            )
+            X_test, y_test = build_global_dataset(
+                variant_test,
+                lb_steps,
+                fc_steps,
+                target_col=target_col,
+                feature_cols=feature_cols,
+                freq_minutes=w["freq_minutes"],
+            )
 
-    # ── Scaling ───────────────────────────────────────────────────────────
-    scaler_full = DatasetScaler().fit(X_train_full, y_train)
-    scaler_base = DatasetScaler().fit(X_train_base, y_train_base)
+            scaler = DatasetScaler().fit(X_train, y_train)
+            X_train_2d_s, X_test_2d_s = scaler.transform_2d(X_train, X_test)
+            X_train_3d_s, X_test_3d_s = scaler.transform_3d(X_train, X_test)
+            y_train_s, y_test_s = scaler.transform_y(y_train, y_test)
+            display_cols = _display_feature_cols(feature_cols, use_savgol)
 
-    X_train_2d_full_s, X_test_2d_full_s = scaler_full.transform_2d(X_train_full, X_test_full)
-    X_train_2d_base_s, X_test_2d_base_s = scaler_base.transform_2d(X_train_base, X_test_base)
+            variants.append(
+                dict(
+                    tag=tag,
+                    feature_label=feature_label,
+                    smoothing=smoothing_label,
+                    use_savgol=use_savgol,
+                    X_train_2d=X_train_2d_s,
+                    X_test_2d=X_test_2d_s,
+                    X_train_3d=X_train_3d_s,
+                    X_test_3d=X_test_3d_s,
+                    y_train=y_train,
+                    y_test=y_test,
+                    y_train_s=y_train_s,
+                    y_test_s=y_test_s,
+                    scaler=scaler,
+                    feature_cols=display_cols,
+                    flat_feature_names=flatten_feature_names(display_cols, lb_steps),
+                )
+            )
+            logger.info(
+                "Dataset shape (%s): X_train=%s, X_test=%s",
+                tag,
+                X_train.shape,
+                X_test.shape,
+            )
 
-    X_train_3d, X_test_3d               = scaler_full.transform_3d(X_train_full, X_test_full)
-    X_train_3d_base, X_test_3d_base     = scaler_base.transform_3d(X_train_base, X_test_base)
-
-    y_train_s, y_test_s = scaler_full.transform_y(y_train, y_test)
+    by_tag = {v["tag"]: v for v in variants}
+    smoothed_full = by_tag["with features + Savitzky-Golay"]
+    smoothed_base = by_tag["baseline + Savitzky-Golay"]
 
     return dict(
-        X_train_2d_full_s=X_train_2d_full_s,
-        X_test_2d_full_s=X_test_2d_full_s,
-        X_train_2d_base_s=X_train_2d_base_s,
-        X_test_2d_base_s=X_test_2d_base_s,
-        X_train_3d=X_train_3d,
-        X_test_3d=X_test_3d,
-        X_train_3d_base=X_train_3d_base,
-        X_test_3d_base=X_test_3d_base,
-        y_train=y_train,
-        y_test=y_test,
-        y_train_base=y_train_base,
-        y_test_base=y_test_base,
-        y_train_s=y_train_s,
-        y_test_s=y_test_s,
-        scaler_full=scaler_full,
-        scaler_base=scaler_base,
+        variants=variants,
+        classical_variants=variants,
+        deep_variants=variants,
+        X_train_2d_full_s=smoothed_full["X_train_2d"],
+        X_test_2d_full_s=smoothed_full["X_test_2d"],
+        X_train_2d_base_s=smoothed_base["X_train_2d"],
+        X_test_2d_base_s=smoothed_base["X_test_2d"],
+        X_train_3d=smoothed_full["X_train_3d"],
+        X_test_3d=smoothed_full["X_test_3d"],
+        X_train_3d_base=smoothed_base["X_train_3d"],
+        X_test_3d_base=smoothed_base["X_test_3d"],
+        y_train=smoothed_full["y_train"],
+        y_test=smoothed_full["y_test"],
+        y_train_base=smoothed_base["y_train"],
+        y_test_base=smoothed_base["y_test"],
+        y_train_s=smoothed_full["y_train_s"],
+        y_test_s=smoothed_full["y_test_s"],
+        scaler_full=smoothed_full["scaler"],
+        scaler_base=smoothed_base["scaler"],
         full_feature_cols=full_feature_cols,
-        base_feature_cols=[TARGET_COL],
-        full_flat_feature_names=flatten_feature_names(full_feature_cols, lb_steps),
-        base_flat_feature_names=flatten_feature_names([TARGET_COL], lb_steps),
+        base_feature_cols=base_feature_cols,
+        full_flat_feature_names=smoothed_full["flat_feature_names"],
+        base_flat_feature_names=smoothed_base["flat_feature_names"],
     )

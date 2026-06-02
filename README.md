@@ -113,6 +113,15 @@ Update `configs/config.yaml` → `paths.data_dir` if you use a different locatio
 
 ### 3. Run the full pipeline
 
+Build the model-ready per-patient master CSVs once:
+
+```bash
+python scripts/export_master_dataframes.py
+```
+
+Then run the model pipeline. `main.py` will load the cached files from
+`output/processed` instead of rebuilding them from XML:
+
 ```bash
 python main.py
 ```
@@ -141,6 +150,8 @@ python scripts/run_single_model.py --model xgb
 | `--models lr svr …` | Run only the listed models |
 | `--skip-deep` | Skip LSTM / GRU (faster for prototyping) |
 | `--no-plots` | Disable figure generation |
+| `--masters-dir PATH` | Load exported master CSVs from this directory (default: `output/processed`) |
+| `--rebuild-masters` | Force rebuilding master DataFrames from XML |
 
 ### 6. EDA notebook
 

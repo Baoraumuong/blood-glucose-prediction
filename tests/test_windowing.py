@@ -41,6 +41,29 @@ def test_create_multistep_target_values():
     np.testing.assert_allclose(y[0], expected_y0, rtol=1e-5)
 
 
+def test_create_multistep_rejects_timestamp_gaps():
+    idx = pd.to_datetime(
+        [
+            "2022-01-01 00:00:00",
+            "2022-01-01 00:05:00",
+            "2022-01-01 00:20:00",
+            "2022-01-01 00:25:00",
+            "2022-01-01 00:30:00",
+        ]
+    )
+    df = pd.DataFrame({"glucose_level": np.arange(5, dtype=np.float32)}, index=idx)
+
+    X, y = create_multistep_dataset(
+        df,
+        lookback_steps=2,
+        forecast_steps=2,
+        freq_minutes=5,
+    )
+
+    assert X.shape == (0, 2, 1)
+    assert y.shape == (0, 2)
+
+
 def test_prepare_datasets_uses_raw_glucose_as_target():
     idx = pd.date_range("2022-01-01", periods=20, freq="5min")
     df = pd.DataFrame(
@@ -60,6 +83,30 @@ def test_prepare_datasets_uses_raw_glucose_as_target():
 
     np.testing.assert_allclose(datasets["y_train"][0], [2, 3])
     assert datasets["X_train_3d"].shape[-1] == 5
+
+
+def test_prepare_datasets_builds_savgol_and_raw_input_variants():
+    idx = pd.date_range("2022-01-01", periods=20, freq="5min")
+    df = pd.DataFrame(
+        {
+            "raw_glucose_level": np.arange(20, dtype=np.float32),
+            "glucose_level": np.arange(20, dtype=np.float32) + 100,
+            "total_insulin": np.zeros(20, dtype=np.float32),
+        },
+        index=idx,
+    )
+    cfg = {"window": {"lookback_minutes": 10, "forecast_minutes": 10, "freq_minutes": 5}}
+
+    datasets = prepare_datasets({"p": df}, {"p": df}, cfg)
+
+    assert [v["tag"] for v in datasets["variants"]] == [
+        "with features + Savitzky-Golay",
+        "baseline + Savitzky-Golay",
+        "with features + no Savitzky-Golay",
+        "baseline + no Savitzky-Golay",
+    ]
+    raw_variant = next(v for v in datasets["variants"] if v["tag"] == "baseline + no Savitzky-Golay")
+    assert raw_variant["feature_cols"] == ["raw_glucose_level"]
 
 
 def test_prepare_datasets_excludes_high_missing_features():

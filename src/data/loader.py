@@ -45,6 +45,39 @@ POINT_VALUE_ATTRS = {
 }
 
 
+def _align_glucose_to_grid(gl: pd.DataFrame, resample_freq: str) -> pd.DataFrame:
+    """
+    Put raw CGM readings on a dense grid without dropping phase-shifted values.
+
+    Some OhioT1DM files contain long stretches sampled every 5 minutes but with
+    different minute offsets, for example :02/:07 followed later by :00/:05.
+    Reindexing against the first timestamp's phase drops the later readings.
+    Keep a stable non-standard phase when one exists; otherwise round readings
+    to the nearest configured grid timestamp and aggregate collisions.
+    """
+    if gl.empty:
+        return gl
+
+    grouped = gl.groupby(level=0).mean().sort_index()
+    try:
+        freq_delta = pd.Timedelta(resample_freq)
+    except ValueError as exc:
+        raise ValueError(f"resample_freq must be a fixed frequency, got {resample_freq!r}") from exc
+
+    elapsed = grouped.index - grouped.index.min()
+    has_single_phase = pd.Index(elapsed % freq_delta).nunique() <= 1
+
+    if has_single_phase:
+        glucose_index = pd.date_range(grouped.index.min(), grouped.index.max(), freq=resample_freq)
+        return grouped.reindex(glucose_index)
+
+    rounded = grouped.copy()
+    rounded.index = rounded.index.round(resample_freq)
+    rounded = rounded.groupby(level=0).mean().sort_index()
+    glucose_index = pd.date_range(rounded.index.min(), rounded.index.max(), freq=resample_freq)
+    return rounded.reindex(glucose_index)
+
+
 def _causal_savgol(series: pd.Series, window_length: int, polyorder: int) -> pd.Series:
     """
     Apply Savitzky-Golay smoothing using only current and past values.
@@ -61,6 +94,8 @@ def _causal_savgol(series: pd.Series, window_length: int, polyorder: int) -> pd.
     values = series.to_numpy(dtype=float)
     for i in range(window_length - 1, len(values)):
         window = values[i - window_length + 1 : i + 1]
+        if np.isnan(window).any():
+            continue
         smoothed.iloc[i] = savgol_filter(
             window,
             window_length=window_length,
@@ -305,7 +340,8 @@ def build_patient_master(
     Build a single master DataFrame for one patient file.
 
     Columns returned:
-      - glucose_level      : causal Savitzky-Golay smoothed glucose input
+      - glucose_level      : causal Savitzky-Golay smoothed glucose input,
+                             preserving missing CGM rows
       - raw_glucose_level  : unsmoothed glucose target for evaluation
       - basis_gsr          : GSR wearable signal aligned to the CGM timestamp grid
       - basis_sleep        : sleep signal aligned to the CGM timestamp grid
@@ -323,7 +359,7 @@ def build_patient_master(
     savgol_window, savgol_polyorder : int
         Savitzky-Golay filter parameters.
     interpolate_limit : int
-        Max consecutive NaN steps filled by linear interpolation.
+        Deprecated; glucose_level missing values are not filled.
     rolling_insulin_window : int
         Rolling window size for insulin std (in 5-min steps).
 
@@ -337,18 +373,11 @@ def build_patient_master(
     gl = OhioT1DMParser(xml_path, "glucose_level", resample_freq).make_dataframe()
     if gl.empty:
         return pd.DataFrame()
-    glucose_index = pd.date_range(gl.index.min(), gl.index.max(), freq=resample_freq)
-    gl = gl.groupby(level=0).mean().reindex(glucose_index)
+    gl = _align_glucose_to_grid(gl, resample_freq)
 
     gl["raw_glucose_level"] = gl["value"]
-    glucose_input = (
-        gl["value"]
-        .interpolate("linear", limit=interpolate_limit)
-        .ffill()
-        .bfill()
-    )
     gl["glucose_level"] = _causal_savgol(
-        glucose_input,
+        gl["value"],
         window_length=savgol_window,
         polyorder=savgol_polyorder,
     )
@@ -451,3 +480,62 @@ def build_all_masters(
         except Exception as exc:
             logger.error("Failed to build master for %s: %s", key, exc)
     return masters
+
+
+def load_master_dataframes(
+    split_name: str,
+    processed_dir: str | Path,
+    savgol_window: int = 11,
+    savgol_polyorder: int = 2,
+) -> dict[str, pd.DataFrame]:
+    """
+    Load exported per-patient master DataFrames for a split.
+
+    Expected file layout:
+      processed_dir/train/{patient_key}_train_master.csv
+      processed_dir/test/{patient_key}_test_master.csv
+    """
+    split_dir = Path(processed_dir) / split_name
+    suffix = f"_{split_name}_master.csv"
+    masters: dict[str, pd.DataFrame] = {}
+
+    if not split_dir.exists():
+        return masters
+
+    for path in sorted(split_dir.glob(f"*{suffix}")):
+        patient_key = path.name.removesuffix(suffix)
+        df = pd.read_csv(path, parse_dates=["ts"], index_col="ts")
+        df.index.name = None
+        if {"raw_glucose_level", "glucose_level"}.issubset(df.columns):
+            df["glucose_level"] = _causal_savgol(
+                df["raw_glucose_level"],
+                window_length=savgol_window,
+                polyorder=savgol_polyorder,
+            )
+        masters[patient_key] = df.sort_index()
+    return masters
+
+
+def save_master_dataframes(
+    split_name: str,
+    masters: dict[str, pd.DataFrame],
+    processed_dir: str | Path,
+    save_missing_reports: bool = True,
+) -> None:
+    """Save per-patient master DataFrames to the cache layout used by main.py."""
+    split_dir = Path(processed_dir) / split_name
+    split_dir.mkdir(parents=True, exist_ok=True)
+
+    for patient_key, df in sorted(masters.items()):
+        if df.empty:
+            continue
+
+        base = f"{patient_key}_{split_name}"
+        df.to_csv(split_dir / f"{base}_master.csv", index_label="ts")
+
+        missing_df = df.attrs.get("missing_percentages_before_imputation")
+        if save_missing_reports and isinstance(missing_df, pd.DataFrame):
+            missing_df.to_csv(
+                split_dir / f"{base}_missing_pct_before_imputation.csv",
+                index=False,
+            )

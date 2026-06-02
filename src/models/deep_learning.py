@@ -92,13 +92,25 @@ def _run_deep_model(
         ),
     ]
 
-    for tag, X3d_tr, X3d_te, ytr_s, yte_orig in [
+    deep_iter = [
+        (
+            v["tag"],
+            v["X_train_3d"],
+            v["X_test_3d"],
+            v["y_train_s"],
+            v["y_test"],
+            v["scaler"],
+        )
+        for v in datasets.get("deep_variants", [])
+    ]
+
+    for tag, X3d_tr, X3d_te, ytr_s, yte_orig, target_scaler in deep_iter or [
         ("with features",
          datasets["X_train_3d"],      datasets["X_test_3d"],
-         datasets["y_train_s"],       datasets["y_test"]),
+         datasets["y_train_s"],       datasets["y_test"], datasets["scaler_full"]),
         ("baseline",
          datasets["X_train_3d_base"], datasets["X_test_3d_base"],
-         datasets["y_train_s"],       datasets["y_test"]),
+         datasets["y_train_s"],       datasets["y_test"], datasets["scaler_base"]),
     ]:
         logger.info("Training %s (%s) …", name, tag)
 
@@ -129,7 +141,7 @@ def _run_deep_model(
 
         # Predict and inverse-transform
         preds_s = model.predict(X3d_te, verbose=0)
-        preds   = datasets["scaler_full"].inverse_transform_y(preds_s)
+        preds   = target_scaler.inverse_transform_y(preds_s)
 
         test_metrics = compute_all_metrics(yte_orig, preds)
         cv_metrics   = dict(

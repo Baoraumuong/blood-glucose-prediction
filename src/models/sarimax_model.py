@@ -115,6 +115,75 @@ def run_sarimax(
     w = cfg["window"]
     n_forecast = w["forecast_minutes"] // w["freq_minutes"]
 
+    for input_col, smoothing_label in [
+        ("glucose_level", "Savitzky-Golay"),
+        ("raw_glucose_level", "no Savitzky-Golay"),
+    ]:
+        all_preds: list[np.ndarray] = []
+        patient_metrics: list[dict] = []
+
+        for key in sorted(train_masters.keys()):
+            if key not in test_masters:
+                logger.warning("SARIMAX: test data missing for %s, skipping", key)
+                continue
+
+            train_df = train_masters[key]
+            test_df = test_masters[key]
+            exog_cols = _feature_columns(train_df, cfg)
+            exog_cols = [c for c in exog_cols if c in test_df.columns]
+            if not exog_cols:
+                logger.warning("SARIMAX: no exogenous columns for %s, skipping", key)
+                continue
+            if input_col not in train_df.columns:
+                logger.warning("SARIMAX: %s missing for %s, skipping", input_col, key)
+                continue
+
+            tr_ser = train_df[input_col]
+            te_ser = test_df.get("raw_glucose_level", test_df["glucose_level"])
+            preds, actuals = _sarimax_patient_forecast(
+                tr_ser,
+                te_ser,
+                train_df[exog_cols],
+                test_df[exog_cols],
+                order,
+                n_forecast,
+            )
+            if preds is None:
+                continue
+
+            metrics = compute_all_metrics(actuals, preds)
+            patient_metrics.append(metrics)
+            all_preds.append(preds)
+            logger.info(
+                "  SARIMAX %s (%s, %d exog) -> RMSE=%.3f R2=%.4f",
+                key,
+                smoothing_label,
+                len(exog_cols),
+                metrics["rmse"],
+                metrics["r2"],
+            )
+
+        if not patient_metrics:
+            logger.error("SARIMAX produced no results for %s.", smoothing_label)
+            continue
+
+        avg_metrics = {
+            k: float(np.mean([m[k] for m in patient_metrics]))
+            for k in patient_metrics[0]
+        }
+        cv_proxy = {f"cv_{k}": v for k, v in avg_metrics.items()}
+        feature_tag = f"with features + {smoothing_label}"
+
+        store.add("SARIMAX", feature_tag, cv_proxy, avg_metrics, np.vstack(all_preds))
+        logger.info(
+            "SARIMAX avg (%s) -> RMSE=%.3f R2=%.4f",
+            smoothing_label,
+            avg_metrics["rmse"],
+            avg_metrics["r2"],
+        )
+
+    return
+
     all_preds: list[np.ndarray] = []
     patient_metrics: list[dict] = []
 
