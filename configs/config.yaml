@@ -65,6 +65,11 @@ evaluation:
   kfold_shuffle: false               # preserve temporal order
   svr_subsample: 5000                # max samples for SVR cross-validation
   svr_train_subsample: 5000          # max samples for final SVR fit
+  grid_search:
+    enabled: true                    # tune models that define param_grid below
+    subsample: 5000                  # tune on a reproducible sample; final fit uses normal training data
+    n_jobs: 1                        # keep low because some estimators parallelize internally
+    verbose: 0
   metrics:
     - rmse
     - mae
@@ -91,22 +96,38 @@ models:
     learning_rate: 0.05
     subsample: 0.8
     colsample_bytree: 0.8
+    param_grid:
+      n_estimators: [200, 300]
+      max_depth: [3, 5]
+      learning_rate: [0.03, 0.05]
+      subsample: [0.8]
+      colsample_bytree: [0.8]
 
   decision_tree:
     enabled: true
     max_depth: 8
     min_samples_leaf: 10
+    param_grid:
+      max_depth: [5, 8, 12]
+      min_samples_leaf: [5, 10, 20]
 
   random_forest:
     enabled: true
     n_estimators: 200
     max_depth: 10
     min_samples_leaf: 5
+    param_grid:
+      n_estimators: [100, 200]
+      max_depth: [8, 12]
+      min_samples_leaf: [5, 10]
 
   knn:
     enabled: true
     n_neighbors: 10
     weights: distance
+    param_grid:
+      n_neighbors: [5, 10, 20]
+      weights: [uniform, distance]
 
   arima:
     enabled: true

@@ -13,6 +13,8 @@ from typing import Any
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import make_scorer
+from sklearn.model_selection import GridSearchCV, KFold
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.svm import SVR
@@ -20,8 +22,91 @@ from sklearn.tree import DecisionTreeRegressor
 import xgboost as xgb
 
 from src.evaluation.metrics import ResultStore, cv_evaluate, test_evaluate
+from src.models.persistence import save_pickle_artifact
 
 logger = logging.getLogger(__name__)
+
+
+def _rmse_loss(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(np.sqrt(np.mean((y_true.ravel() - y_pred.ravel()) ** 2)))
+
+
+def _maybe_prefix_grid(
+    param_grid: dict[str, list[Any]],
+    prefix: str | None,
+) -> dict[str, list[Any]]:
+    if not prefix:
+        return param_grid
+    return {
+        key if "__" in key else f"{prefix}__{key}": values
+        for key, values in param_grid.items()
+    }
+
+
+def _tune_model(
+    model: Any,
+    name: str,
+    feature_tag: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    param_grid: dict[str, list[Any]] | None,
+    cfg: dict[str, Any],
+    n_folds: int,
+    shuffle: bool,
+    grid_prefix: str | None = None,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Run optional GridSearchCV and return the best estimator."""
+    if not param_grid:
+        return model, None
+
+    tuning_cfg = cfg.get("evaluation", {}).get("grid_search", {})
+    if not tuning_cfg.get("enabled", False):
+        return model, None
+
+    tune_X, tune_y = X, y
+    subsample = tuning_cfg.get("subsample")
+    if subsample and len(X) > subsample:
+        rng = np.random.default_rng(cfg.get("seed", 42))
+        idx = rng.choice(len(X), subsample, replace=False)
+        tune_X, tune_y = X[idx], y[idx]
+        logger.info(
+            "Grid search for %s (%s) using %d/%d training samples",
+            name,
+            feature_tag,
+            len(tune_X),
+            len(X),
+        )
+
+    grid = _maybe_prefix_grid(param_grid, grid_prefix)
+    cv = KFold(n_splits=n_folds, shuffle=shuffle)
+    search = GridSearchCV(
+        estimator=model,
+        param_grid=grid,
+        scoring=make_scorer(_rmse_loss, greater_is_better=False),
+        cv=cv,
+        n_jobs=tuning_cfg.get("n_jobs", 1),
+        refit=True,
+        verbose=tuning_cfg.get("verbose", 0),
+    )
+    logger.info(
+        "Grid search for %s (%s): %d parameter(s)",
+        name,
+        feature_tag,
+        len(grid),
+    )
+    search.fit(tune_X, tune_y)
+    best_params = {
+        key.removeprefix(f"{grid_prefix}__") if grid_prefix else key: value
+        for key, value in search.best_params_.items()
+    }
+    logger.info(
+        "Best %s (%s) params: %s | CV RMSE=%.3f",
+        name,
+        feature_tag,
+        best_params,
+        -search.best_score_,
+    )
+    return search.best_estimator_, best_params
 
 
 def _run_model(
@@ -33,11 +118,18 @@ def _run_model(
     X_test:  np.ndarray,
     y_test:  np.ndarray,
     store:   ResultStore,
+    cfg: dict[str, Any],
     n_folds: int = 5,
     svr_subsample: int | None = None,
     train_subsample: int | None = None,
     seed: int = 42,
+    shuffle: bool = False,
     feature_names: list[str] | None = None,
+    scaler: Any | None = None,
+    feature_cols: list[str] | None = None,
+    use_savgol: bool | None = None,
+    param_grid: dict[str, list[Any]] | None = None,
+    grid_prefix: str | None = None,
 ) -> None:
     """Shared CV + test routine for classical models."""
     logger.info("Training %s (%s) …", name, feature_tag)
@@ -55,8 +147,37 @@ def _run_model(
         idx = rng.choice(len(X_train), train_subsample, replace=False)
         Xfit, yfit = X_train[idx], y_train[idx]
 
-    cv_metrics  = cv_evaluate(model, Xcv, ycv, n_folds=n_folds)
+    model, best_params = _tune_model(
+        model=model,
+        name=name,
+        feature_tag=feature_tag,
+        X=Xcv,
+        y=ycv,
+        param_grid=param_grid,
+        cfg=cfg,
+        n_folds=n_folds,
+        shuffle=shuffle,
+        grid_prefix=grid_prefix,
+    )
+    cv_metrics  = cv_evaluate(model, Xcv, ycv, n_folds=n_folds, shuffle=shuffle)
     preds, test_metrics = test_evaluate(model, Xfit, yfit, X_test, y_test)
+    artifact_path = save_pickle_artifact(
+        cfg=cfg,
+        model_name=name,
+        feature_tag=feature_tag,
+        filename="model.pkl",
+        payload={
+            "model": model,
+            "model_name": name,
+            "feature_tag": feature_tag,
+            "scaler": scaler,
+            "feature_cols": feature_cols,
+            "feature_names": feature_names,
+            "use_savgol": use_savgol,
+            "best_params": best_params,
+        },
+    )
+    logger.info("Saved %s (%s) artifact: %s", name, feature_tag, artifact_path)
     store.add(name, feature_tag, cv_metrics, test_metrics, preds)
     _log_top_feature_importances(model, name, feature_tag, feature_names)
 
@@ -129,13 +250,18 @@ def run_linear_regression(
 ) -> None:
     eval_cfg = cfg.get("evaluation", {})
     n_folds  = eval_cfg.get("n_folds", 5)
+    shuffle  = eval_cfg.get("kfold_shuffle", False)
 
     for variant in _iter_classical_variants(datasets):
         tag = variant["tag"]
         _run_model(LinearRegression(), "LinearRegression", tag,
                    variant["X_train_2d"], variant["y_train"],
-                   variant["X_test_2d"], variant["y_test"], store, n_folds,
-                   feature_names=variant["flat_feature_names"])
+                   variant["X_test_2d"], variant["y_test"], store, cfg, n_folds,
+                   shuffle=shuffle,
+                   feature_names=variant["flat_feature_names"],
+                   scaler=variant.get("scaler"),
+                   feature_cols=variant.get("feature_cols"),
+                   use_savgol=variant.get("use_savgol"))
 
 
 def run_svr(
@@ -146,6 +272,7 @@ def run_svr(
     eval_cfg  = cfg.get("evaluation", {})
     model_cfg = cfg["models"].get("svr", {})
     n_folds   = eval_cfg.get("n_folds", 5)
+    shuffle   = eval_cfg.get("kfold_shuffle", False)
     subsample = eval_cfg.get("svr_subsample", 5000)
     train_subsample = eval_cfg.get("svr_train_subsample", subsample)
     seed = cfg.get("seed", 42)
@@ -164,9 +291,14 @@ def run_svr(
         _run_model(model, "SVR", tag,
                    variant["X_train_2d"], variant["y_train"],
                    variant["X_test_2d"], variant["y_test"], store,
-                   n_folds, svr_subsample=subsample,
-                   train_subsample=train_subsample, seed=seed,
-                   feature_names=variant["flat_feature_names"])
+                   cfg, n_folds, svr_subsample=subsample,
+                   train_subsample=train_subsample, seed=seed, shuffle=shuffle,
+                   feature_names=variant["flat_feature_names"],
+                   scaler=variant.get("scaler"),
+                   feature_cols=variant.get("feature_cols"),
+                   use_savgol=variant.get("use_savgol"),
+                   param_grid=model_cfg.get("param_grid"),
+                   grid_prefix="estimator")
 
 
 def run_xgboost(
@@ -177,6 +309,7 @@ def run_xgboost(
     eval_cfg  = cfg.get("evaluation", {})
     model_cfg = cfg["models"].get("xgboost", {})
     n_folds   = eval_cfg.get("n_folds", 5)
+    shuffle   = eval_cfg.get("kfold_shuffle", False)
     seed      = cfg.get("seed", 42)
 
     base_xgb = xgb.XGBRegressor(
@@ -195,8 +328,14 @@ def run_xgboost(
         model = MultiOutputRegressor(base_xgb, n_jobs=-1)
         _run_model(model, "XGBoost", tag,
                    variant["X_train_2d"], variant["y_train"],
-                   variant["X_test_2d"], variant["y_test"], store, n_folds,
-                   feature_names=variant["flat_feature_names"])
+                   variant["X_test_2d"], variant["y_test"], store, cfg, n_folds,
+                   shuffle=shuffle,
+                   feature_names=variant["flat_feature_names"],
+                   scaler=variant.get("scaler"),
+                   feature_cols=variant.get("feature_cols"),
+                   use_savgol=variant.get("use_savgol"),
+                   param_grid=model_cfg.get("param_grid"),
+                   grid_prefix="estimator")
 
 
 def run_decision_tree(
@@ -207,6 +346,7 @@ def run_decision_tree(
     eval_cfg  = cfg.get("evaluation", {})
     model_cfg = cfg["models"].get("decision_tree", {})
     n_folds   = eval_cfg.get("n_folds", 5)
+    shuffle   = eval_cfg.get("kfold_shuffle", False)
     seed      = cfg.get("seed", 42)
 
     for variant in _iter_classical_variants(datasets):
@@ -218,8 +358,13 @@ def run_decision_tree(
         )
         _run_model(model, "DecisionTree", tag,
                    variant["X_train_2d"], variant["y_train"],
-                   variant["X_test_2d"], variant["y_test"], store, n_folds,
-                   feature_names=variant["flat_feature_names"])
+                   variant["X_test_2d"], variant["y_test"], store, cfg, n_folds,
+                   shuffle=shuffle,
+                   feature_names=variant["flat_feature_names"],
+                   scaler=variant.get("scaler"),
+                   feature_cols=variant.get("feature_cols"),
+                   use_savgol=variant.get("use_savgol"),
+                   param_grid=model_cfg.get("param_grid"))
 
 
 def run_random_forest(
@@ -230,6 +375,7 @@ def run_random_forest(
     eval_cfg  = cfg.get("evaluation", {})
     model_cfg = cfg["models"].get("random_forest", {})
     n_folds   = eval_cfg.get("n_folds", 5)
+    shuffle   = eval_cfg.get("kfold_shuffle", False)
     seed      = cfg.get("seed", 42)
 
     for variant in _iter_classical_variants(datasets):
@@ -243,8 +389,13 @@ def run_random_forest(
         )
         _run_model(model, "RandomForest", tag,
                    variant["X_train_2d"], variant["y_train"],
-                   variant["X_test_2d"], variant["y_test"], store, n_folds,
-                   feature_names=variant["flat_feature_names"])
+                   variant["X_test_2d"], variant["y_test"], store, cfg, n_folds,
+                   shuffle=shuffle,
+                   feature_names=variant["flat_feature_names"],
+                   scaler=variant.get("scaler"),
+                   feature_cols=variant.get("feature_cols"),
+                   use_savgol=variant.get("use_savgol"),
+                   param_grid=model_cfg.get("param_grid"))
 
 
 def run_knn(
@@ -255,6 +406,7 @@ def run_knn(
     eval_cfg  = cfg.get("evaluation", {})
     model_cfg = cfg["models"].get("knn", {})
     n_folds   = eval_cfg.get("n_folds", 5)
+    shuffle   = eval_cfg.get("kfold_shuffle", False)
 
     for variant in _iter_classical_variants(datasets):
         tag = variant["tag"]
@@ -265,5 +417,10 @@ def run_knn(
         )
         _run_model(model, "KNN", tag,
                    variant["X_train_2d"], variant["y_train"],
-                   variant["X_test_2d"], variant["y_test"], store, n_folds,
-                   feature_names=variant["flat_feature_names"])
+                   variant["X_test_2d"], variant["y_test"], store, cfg, n_folds,
+                   shuffle=shuffle,
+                   feature_names=variant["flat_feature_names"],
+                   scaler=variant.get("scaler"),
+                   feature_cols=variant.get("feature_cols"),
+                   use_savgol=variant.get("use_savgol"),
+                   param_grid=model_cfg.get("param_grid"))

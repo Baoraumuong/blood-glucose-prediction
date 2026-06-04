@@ -80,23 +80,20 @@ def cv_evaluate(
 
     Returns
     -------
-    dict with keys: cv_rmse, cv_rmse_std, cv_r2, cv_r2_std
+    dict with keys: cv_rmse, cv_mae, cv_r2, cv_mard
     """
     kf = KFold(n_splits=n_folds, shuffle=shuffle)
-    rmse_list, r2_list = [], []
+    fold_metrics: list[dict[str, float]] = []
 
     for tr_idx, val_idx in kf.split(X):
         model.fit(X[tr_idx], y[tr_idx])
         preds = model.predict(X[val_idx])
-        rmse_list.append(rmse(y[val_idx], preds))
-        r2_list.append(r2(y[val_idx], preds))
+        fold_metrics.append(compute_all_metrics(y[val_idx], preds))
 
-    return dict(
-        cv_rmse=float(np.mean(rmse_list)),
-        cv_rmse_std=float(np.std(rmse_list)),
-        cv_r2=float(np.mean(r2_list)),
-        cv_r2_std=float(np.std(r2_list)),
-    )
+    return {
+        f"cv_{metric}": float(np.mean([m[metric] for m in fold_metrics]))
+        for metric in fold_metrics[0]
+    }
 
 
 def test_evaluate(
