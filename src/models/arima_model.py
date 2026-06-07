@@ -13,7 +13,12 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from src.evaluation.metrics import ResultStore, compute_all_metrics
 from src.models.persistence import safe_name, save_pickle_artifact
-from src.models.time_series_utils import fill_series_gaps, is_finite_window
+from src.models.time_series_utils import (
+    fill_series_gaps,
+    is_finite_window,
+    ensure_monotonic_series,
+    ensure_supported_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +72,9 @@ def _forecast_windows(
             continue
         try:
             history = all_model_series.iloc[:start]
+            if isinstance(history.index, pd.DatetimeIndex) and history.index.freq is None:
+                history = history.copy()
+                history.index = pd.RangeIndex(len(history))
             fc = fit.apply(history, refit=False).forecast(n_forecast)
             if not is_finite_window(fc.values):
                 logger.debug("ARIMA window %d skipped because predictions contain NaN/inf", i)
@@ -116,6 +124,8 @@ def _arima_cv_metrics(
     for fold_idx, (tr_idx, val_idx) in enumerate(kf.split(clean), start=1):
         fold_train = clean.iloc[np.sort(tr_idx)]
         fold_val = clean.iloc[np.sort(val_idx)]
+        fold_train = ensure_supported_series(fold_train)
+        fold_val = ensure_supported_series(fold_val)
         if len(fold_val) < n_forecast or len(fold_train) < n_forecast:
             continue
         fit, train_smooth = _fit_arima(fold_train, order)
@@ -172,7 +182,9 @@ def run_arima(
                 continue
 
             tr_ser = train_df[input_col]
+            tr_ser = ensure_monotonic_series(tr_ser)
             te_ser = test_df.get("raw_glucose_level", test_df["glucose_level"])
+            te_ser = ensure_monotonic_series(te_ser)
             cv_metrics = _arima_cv_metrics(tr_ser, order, n_forecast, n_folds, shuffle)
             if cv_metrics is not None:
                 cv_metrics_by_patient.append(cv_metrics)

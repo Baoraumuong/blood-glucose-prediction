@@ -13,7 +13,12 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from src.evaluation.metrics import ResultStore, compute_all_metrics
 from src.models.persistence import safe_name, save_pickle_artifact
-from src.models.time_series_utils import fill_series_gaps, is_finite_window
+from src.models.time_series_utils import (
+    fill_series_gaps,
+    is_finite_window,
+    normalize_series_and_exog,
+    ensure_supported_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +52,12 @@ def _fit_sarimax(
     order: tuple[int, int, int],
 ) -> tuple[Any | None, pd.Series | None, pd.DataFrame | None, pd.Series | None, pd.Series | None]:
     train_model = fill_series_gaps(train_series)
+    train_model, train_exog = normalize_series_and_exog(train_model, train_exog)
     if train_model.empty:
         return None, None, None, None, None
 
     train_smooth = train_model.ewm(span=5, adjust=False).mean()
-    train_x, _, mean, std = _scale_exog(
-        train_exog.reindex(train_model.index),
-        train_exog.reindex(train_model.index),
-    )
+    train_x, _, mean, std = _scale_exog(train_exog, train_exog)
     try:
         fit = SARIMAX(
             train_smooth,
@@ -86,10 +89,11 @@ def _forecast_windows(
     n_forecast: int,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     test_model = fill_series_gaps(test_series)
+    test_model, test_exog = normalize_series_and_exog(test_model, test_exog)
     if test_model.empty:
         return None, None
 
-    test_x = _transform_exog(test_exog.reindex(test_model.index), exog_mean, exog_std)
+    test_x = _transform_exog(test_exog, exog_mean, exog_std)
     all_model_series = pd.concat([train_smooth, test_model])
     all_actual_series = pd.concat([train_smooth, pd.to_numeric(test_series, errors="coerce")])
     all_exog = pd.concat([train_x, test_x])
@@ -110,6 +114,13 @@ def _forecast_windows(
         try:
             history = all_model_series.iloc[:start]
             history_exog = all_exog.iloc[:start]
+            if isinstance(history.index, pd.DatetimeIndex) and history.index.freq is None:
+                history = history.copy()
+                history_exog = history_exog.copy()
+                future_exog = future_exog.copy()
+                history.index = pd.RangeIndex(len(history))
+                history_exog.index = pd.RangeIndex(len(history_exog))
+                future_exog.index = pd.RangeIndex(len(future_exog))
             fc = fit.apply(history, exog=history_exog, refit=False).forecast(
                 n_forecast,
                 exog=future_exog,
@@ -183,6 +194,8 @@ def _sarimax_cv_metrics(
         val_idx = np.sort(val_idx)
         fold_train = clean.iloc[tr_idx]
         fold_val = clean.iloc[val_idx]
+        fold_train = ensure_supported_series(fold_train)
+        fold_val = ensure_supported_series(fold_val)
         if len(fold_val) < n_forecast or len(fold_train) < n_forecast:
             continue
         fold_train_exog = train_exog.reindex(clean.index).iloc[tr_idx]

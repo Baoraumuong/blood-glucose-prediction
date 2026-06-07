@@ -48,6 +48,7 @@ from src.models.classical import (
 from src.models.arima_model import run_arima
 from src.models.sarimax_model import run_sarimax
 from src.models.deep_learning import run_lstm, run_gru
+from src.models.stacking import run_stacking
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -60,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--models", nargs="+",
-        choices=["lr", "svr", "xgb", "dt", "rf", "knn", "arima", "sarimax", "lstm", "gru"],
+        choices=["lr", "svr", "xgb", "dt", "rf", "knn", "arima", "sarimax", "lstm", "gru", "stack"],
         help="Run only the specified models (default: all enabled in config)",
     )
     parser.add_argument(
@@ -224,6 +225,8 @@ def main() -> None:
             run_lstm(datasets, store, cfg)
         if should_run("gru",  "gru"):
             run_gru(datasets, store, cfg)
+        if should_run("stack", "stacking"):
+            run_stacking(datasets, store, cfg)
     else:
         logger.info("Skipping LSTM / GRU (--skip-deep flag set)")
 
