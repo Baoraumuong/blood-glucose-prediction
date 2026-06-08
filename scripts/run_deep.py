@@ -2,7 +2,7 @@
 """
 scripts/run_deep.py
 -------------------
-Run LSTM and GRU models only.
+Run LSTM, GRU, and STACKED_LSTM models only.
 
 Usage
 -----
@@ -23,7 +23,7 @@ args = parser.parse_args()
 cmd = [
     sys.executable, "main.py",
     "--config", args.config,
-    "--models", "lstm", "gru",
+    "--models", "lstm", "gru", "stacked_lstm",
 ]
 if args.no_plots:
     cmd.append("--no-plots")

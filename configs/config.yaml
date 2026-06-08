@@ -53,6 +53,9 @@ feature_engineering:
   savgol_polyorder: 2
   interpolate_limit: 6              # max consecutive NaN steps to fill
   rolling_insulin_window: 36        # 3-hour window (36 × 5 min) for std
+  kalman:
+    process_variance: 0.001
+    measurement_variance: 4.0
   exclude_features:
     - acceleration
     - basis_steps
@@ -160,6 +163,15 @@ deep_learning:
     units: [128, 64]
     dropout: 0.2
     dense_units: 32
+
+  stacked_lstm:
+    enabled: true
+    units: 128
+    dropout: 0.2
+    dense_units: [512, 128]
+    epochs: 6000
+    batch_size: 128
+    early_stopping_patience: 128
 
 # Reproducibility
 seed: 42

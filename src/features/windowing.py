@@ -59,6 +59,73 @@ def _display_feature_cols(feature_cols: list[str], use_savgol: bool) -> list[str
     return [RAW_TARGET_COL if c == TARGET_COL else c for c in feature_cols]
 
 
+def _kalman_smooth_series(
+    series: pd.Series,
+    process_variance: float = 1e-3,
+    measurement_variance: float = 4.0,
+) -> pd.Series:
+    """Smooth one glucose series with a local-level Kalman filter and RTS pass."""
+    values = series.to_numpy(dtype=float)
+    valid = ~np.isnan(values)
+    if not valid.any():
+        return series.copy()
+
+    n = len(values)
+    filtered = np.empty(n, dtype=float)
+    filtered_var = np.empty(n, dtype=float)
+    predicted = np.empty(n, dtype=float)
+    predicted_var = np.empty(n, dtype=float)
+
+    state = float(values[valid][0])
+    variance = float(measurement_variance)
+
+    for i, value in enumerate(values):
+        pred_state = state
+        pred_var = variance + process_variance
+        predicted[i] = pred_state
+        predicted_var[i] = pred_var
+
+        if np.isnan(value):
+            state = pred_state
+            variance = pred_var
+        else:
+            gain = pred_var / (pred_var + measurement_variance)
+            state = pred_state + gain * (value - pred_state)
+            variance = (1.0 - gain) * pred_var
+
+        filtered[i] = state
+        filtered_var[i] = variance
+
+    smoothed = filtered.copy()
+    smoothed_var = filtered_var.copy()
+    for i in range(n - 2, -1, -1):
+        denom = predicted_var[i + 1]
+        gain = filtered_var[i] / denom if denom > 0 else 0.0
+        smoothed[i] = filtered[i] + gain * (smoothed[i + 1] - predicted[i + 1])
+        smoothed_var[i] = filtered_var[i] + gain**2 * (smoothed_var[i + 1] - predicted_var[i + 1])
+
+    return pd.Series(smoothed, index=series.index, name=series.name)
+
+
+def _replace_glucose_with_kalman(
+    masters: dict[str, pd.DataFrame],
+    process_variance: float = 1e-3,
+    measurement_variance: float = 4.0,
+) -> dict[str, pd.DataFrame]:
+    """Return per-patient masters with glucose_level Kalman-smoothed independently."""
+    out: dict[str, pd.DataFrame] = {}
+    for key, df in masters.items():
+        kalman_df = df.copy()
+        source_col = RAW_TARGET_COL if RAW_TARGET_COL in kalman_df.columns else TARGET_COL
+        kalman_df[TARGET_COL] = _kalman_smooth_series(
+            kalman_df[source_col],
+            process_variance=process_variance,
+            measurement_variance=measurement_variance,
+        )
+        out[key] = kalman_df
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core windowing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -413,3 +480,101 @@ def prepare_datasets(
         full_flat_feature_names=smoothed_full["flat_feature_names"],
         base_flat_feature_names=smoothed_base["flat_feature_names"],
     )
+
+
+def prepare_kalman_datasets(
+    train_masters: dict[str, pd.DataFrame],
+    test_masters: dict[str, pd.DataFrame],
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Build glucose-only and feature-rich variants after per-split Kalman smoothing."""
+    w = cfg["window"]
+    lb_steps = w["lookback_minutes"] // w["freq_minutes"]
+    fc_steps = w["forecast_minutes"] // w["freq_minutes"]
+    kalman_cfg = cfg.get("feature_engineering", {}).get("kalman", {})
+
+    logger.info(
+        "Building Kalman-smoothed datasets (lookback=%d, forecast=%d steps) ...",
+        lb_steps,
+        fc_steps,
+    )
+    kalman_train = _replace_glucose_with_kalman(
+        train_masters,
+        process_variance=kalman_cfg.get("process_variance", 1e-3),
+        measurement_variance=kalman_cfg.get("measurement_variance", 4.0),
+    )
+    kalman_test = _replace_glucose_with_kalman(
+        test_masters,
+        process_variance=kalman_cfg.get("process_variance", 1e-3),
+        measurement_variance=kalman_cfg.get("measurement_variance", 4.0),
+    )
+
+    all_master_dfs = [*train_masters.values(), *test_masters.values()]
+    target_col = (
+        RAW_TARGET_COL
+        if all(RAW_TARGET_COL in df.columns for df in all_master_dfs)
+        else TARGET_COL
+    )
+    sample_df = next(iter(train_masters.values()))
+    excluded = set(cfg.get("feature_engineering", {}).get(
+        "exclude_features",
+        DEFAULT_EXCLUDED_FEATURES,
+    ))
+    full_feature_cols = [
+        c for c in sample_df.columns
+        if c != RAW_TARGET_COL and c not in excluded
+    ]
+    base_feature_cols = [TARGET_COL]
+    variants: list[dict[str, Any]] = []
+
+    for feature_label, feature_cols in [
+        ("with features", full_feature_cols),
+        ("baseline", base_feature_cols),
+    ]:
+        tag = f"{feature_label} + Kalman"
+        X_train, y_train = build_global_dataset(
+            kalman_train,
+            lb_steps,
+            fc_steps,
+            target_col=target_col,
+            feature_cols=feature_cols,
+            freq_minutes=w["freq_minutes"],
+        )
+        X_test, y_test = build_global_dataset(
+            kalman_test,
+            lb_steps,
+            fc_steps,
+            target_col=target_col,
+            feature_cols=feature_cols,
+            freq_minutes=w["freq_minutes"],
+        )
+        scaler = DatasetScaler().fit(X_train, y_train)
+        X_train_3d_s, X_test_3d_s = scaler.transform_3d(X_train, X_test)
+        y_train_s, y_test_s = scaler.transform_y(y_train, y_test)
+
+        variants.append(
+            dict(
+                tag=tag,
+                feature_label=feature_label,
+                smoothing="Kalman",
+                use_savgol=False,
+                use_kalman=True,
+                X_train_3d=X_train_3d_s,
+                X_test_3d=X_test_3d_s,
+                y_train=y_train,
+                y_test=y_test,
+                y_train_s=y_train_s,
+                y_test_s=y_test_s,
+                scaler=scaler,
+                feature_cols=feature_cols,
+                flat_feature_names=flatten_feature_names(feature_cols, lb_steps),
+            )
+        )
+        logger.info(
+            "Kalman dataset shape (%s): X_train=%s, X_test=%s",
+            tag,
+            X_train.shape,
+            X_test.shape,
+        )
+
+    return {"deep_variants": variants}
