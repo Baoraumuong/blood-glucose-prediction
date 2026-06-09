@@ -47,6 +47,7 @@ def _build_rnn(
 
 def _build_stacked_lstm(
     input_shape: tuple[int, int],
+    output_steps: int,
     units: int,
     dropout: float,
     dense_units: list[int],
@@ -54,7 +55,6 @@ def _build_stacked_lstm(
 ) -> Any:
     """Construct the requested two-layer stacked LSTM."""
     from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
-    from tensorflow.keras.losses import Poisson
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.optimizers import Adam
 
@@ -66,21 +66,11 @@ def _build_stacked_lstm(
             LSTM(units),
             Dense(dense_units[0], activation="relu"),
             Dense(dense_units[1], activation="relu"),
-            Dense(1, activation="exponential"),
+            Dense(output_steps),
         ]
     )
-    model.compile(optimizer=Adam(learning_rate), loss=Poisson(name="negative_log_likelihood"))
+    model.compile(optimizer=Adam(learning_rate), loss="huber")
     return model
-
-
-def _last_horizon(y: np.ndarray) -> np.ndarray:
-    return y[:, -1:].astype(np.float32)
-
-
-def _inverse_last_horizon(target_scaler: Any, y_last_scaled: np.ndarray, steps: int) -> np.ndarray:
-    padded = np.zeros((len(y_last_scaled), steps), dtype=np.float32)
-    padded[:, -1:] = y_last_scaled
-    return target_scaler.inverse_transform_y(padded)[:, -1:]
 
 
 def _run_deep_model(
@@ -291,6 +281,7 @@ def run_stacked_lstm(
     def build_model(input_shape: tuple[int, int]) -> Any:
         return _build_stacked_lstm(
             input_shape=input_shape,
+            output_steps=fc_steps,
             units=model_cfg.get("units", 128),
             dropout=model_cfg.get("dropout", 0.2),
             dense_units=model_cfg.get("dense_units", [512, 128]),
@@ -303,17 +294,16 @@ def run_stacked_lstm(
         shuffle = cfg.get("evaluation", {}).get("kfold_shuffle", False)
         fold_metrics: list[dict[str, float]] = []
         kf = KFold(n_splits=n_folds, shuffle=shuffle)
-        ytr_last_s = _last_horizon(ytr_s)
 
         for fold_idx, (tr_idx, val_idx) in enumerate(kf.split(X3d_tr), start=1):
             logger.info("  %s %s CV fold %d/%d", name, tag, fold_idx, n_folds)
             fold_model = build_model((X3d_tr.shape[1], X3d_tr.shape[2]))
             fold_model.fit(
                 X3d_tr[tr_idx],
-                ytr_last_s[tr_idx],
+                ytr_s[tr_idx],
                 epochs=model_cfg.get("epochs", dl_cfg.get("epochs", 6000)),
                 batch_size=model_cfg.get("batch_size", dl_cfg.get("batch_size", 128)),
-                validation_data=(X3d_tr[val_idx], ytr_last_s[val_idx]),
+                validation_data=(X3d_tr[val_idx], ytr_s[val_idx]),
                 callbacks=[
                     EarlyStopping(
                         monitor="val_loss",
@@ -327,8 +317,8 @@ def run_stacked_lstm(
                 verbose=0,
             )
             val_preds_s = fold_model.predict(X3d_tr[val_idx], verbose=0)
-            val_preds = _inverse_last_horizon(target_scaler, val_preds_s, fc_steps)
-            val_actual = ytr_orig[val_idx, -1:]
+            val_preds = target_scaler.inverse_transform_y(val_preds_s)
+            val_actual = ytr_orig[val_idx]
             fold_metrics.append(compute_all_metrics(val_actual, val_preds))
 
             import tensorflow as tf
@@ -345,7 +335,16 @@ def run_stacked_lstm(
         if model_path.exists():
             try:
                 model = load_model(model_path)
-                logger.info("Loaded existing %s (%s) checkpoint: %s", name, tag, model_path)
+                if model.output_shape[-1] != fc_steps:
+                    logger.warning(
+                        "Ignoring incompatible %s checkpoint with output_shape=%s; expected %d steps",
+                        model_path,
+                        model.output_shape,
+                        fc_steps,
+                    )
+                    model = build_model((X3d_tr.shape[1], X3d_tr.shape[2]))
+                else:
+                    logger.info("Loaded existing %s (%s) checkpoint: %s", name, tag, model_path)
             except Exception as exc:
                 logger.warning("Could not load %s; starting a fresh model: %s", model_path, exc)
                 model = build_model((X3d_tr.shape[1], X3d_tr.shape[2]))
@@ -354,7 +353,7 @@ def run_stacked_lstm(
 
         model.fit(
             X3d_tr,
-            ytr_last_s,
+            ytr_s,
             epochs=model_cfg.get("epochs", dl_cfg.get("epochs", 6000)),
             batch_size=model_cfg.get("batch_size", dl_cfg.get("batch_size", 128)),
             validation_split=model_cfg.get("validation_split", dl_cfg.get("validation_split", 0.1)),
@@ -373,9 +372,8 @@ def run_stacked_lstm(
         )
 
         preds_s = model.predict(X3d_te, verbose=0)
-        preds = _inverse_last_horizon(target_scaler, preds_s, fc_steps)
-        test_actual = yte_orig[:, -1:]
-        test_metrics = compute_all_metrics(test_actual, preds)
+        preds = target_scaler.inverse_transform_y(preds_s)
+        test_metrics = compute_all_metrics(yte_orig, preds)
 
         model.save(model_path)
         metadata_path = save_pickle_artifact(
@@ -390,7 +388,8 @@ def run_stacked_lstm(
                 "feature_cols": feature_cols,
                 "use_kalman": True,
                 "input_shape": tuple(X3d_tr.shape[1:]),
-                "target_horizon_step": fc_steps,
+                "output_steps": fc_steps,
+                "loss": "huber",
             },
         )
         logger.info("Saved %s (%s) model: %s", name, tag, model_path)
