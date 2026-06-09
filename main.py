@@ -49,6 +49,7 @@ from src.models.arima_model import run_arima
 from src.models.sarimax_model import run_sarimax
 from src.models.deep_learning import run_lstm, run_gru
 from src.models.stacking import run_stacking
+from src.models.deep_learning import run_lstm, run_gru, run_stacked_lstm
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -61,7 +62,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--models", nargs="+",
-        choices=["lr", "svr", "xgb", "dt", "rf", "knn", "arima", "sarimax", "lstm", "gru", "stack"],
+        choices=[
+            "lr",
+            "svr",
+            "xgb",
+            "dt",
+            "rf",
+            "knn",
+            "arima",
+            "sarimax",
+            "lstm",
+            "gru",
+            "stacked_lstm",
+            "slstm",
+            "stack"
+        ],
         help="Run only the specified models (default: all enabled in config)",
     )
     parser.add_argument(
@@ -189,7 +204,10 @@ def main() -> None:
     requested = set(args.models or [])
 
     def should_run(short_name: str, config_key: str) -> bool:
-        enabled_in_cfg = models_cfg.get(config_key, {}).get("enabled", True)
+        model_section = models_cfg.get(config_key)
+        if model_section is None:
+            model_section = cfg.get("deep_learning", {}).get(config_key, {})
+        enabled_in_cfg = model_section.get("enabled", True)
         if not enabled_in_cfg:
             return False
         if run_all:
@@ -227,8 +245,10 @@ def main() -> None:
             run_gru(datasets, store, cfg)
         if should_run("stack", "stacking"):
             run_stacking(datasets, store, cfg)
+        if should_run("stacked_lstm", "stacked_lstm") or should_run("slstm", "stacked_lstm"):
+            run_stacked_lstm(train_masters, test_masters, store, cfg)
     else:
-        logger.info("Skipping LSTM / GRU (--skip-deep flag set)")
+        logger.info("Skipping LSTM / GRU / STACKED_LSTM (--skip-deep flag set)")
 
     # ── 4. Save results ───────────────────────────────────────────────────
     logger.info("[4/5] Saving results …")

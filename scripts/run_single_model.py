@@ -15,7 +15,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 
-VALID_MODELS = ["lr", "svr", "xgb", "dt", "rf", "knn", "arima", "lstm", "gru"]
+VALID_MODELS = [
+    "lr",
+    "svr",
+    "xgb",
+    "dt",
+    "rf",
+    "knn",
+    "arima",
+    "sarimax",
+    "lstm",
+    "gru",
+    "stacked_lstm",
+    "slstm",
+]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model",    required=True, choices=VALID_MODELS, help="Model short name")
@@ -28,7 +41,7 @@ cmd = [
     "--config", args.config,
     "--models", args.model,
 ]
-if args.model not in ("lstm", "gru"):
+if args.model not in ("lstm", "gru", "stacked_lstm", "slstm"):
     cmd.append("--skip-deep")
 if args.no_plots:
     cmd.append("--no-plots")
