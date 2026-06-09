@@ -25,9 +25,10 @@ def _build_rnn(
     learning_rate: float,
 ) -> Any:
     """Construct and compile a two-layer LSTM or GRU."""
-    from tensorflow.keras.layers import GRU, LSTM, Dense, Dropout, Input
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.optimizers import Adam
+    
+    from keras.layers import GRU, LSTM, Dense, Dropout, Input
+    from keras.models import Sequential
+    from keras.optimizers import Adam
 
     rnn_layer = LSTM if rnn_type.lower() == "lstm" else GRU
     model = Sequential(
@@ -89,7 +90,7 @@ def _run_deep_model(
     store: ResultStore,
     cfg: dict[str, Any],
 ) -> None:
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+    from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
     dl_cfg = cfg.get("deep_learning", {})
     model_cfg = dl_cfg.get(rnn_type.lower(), {})
@@ -182,9 +183,9 @@ def _run_deep_model(
             val_actual = target_scaler.inverse_transform_y(ytr_s[val_idx])
             fold_metrics.append(compute_all_metrics(val_actual, val_preds))
 
-            import tensorflow as tf
+            import keras
 
-            tf.keras.backend.clear_session()
+            keras.backend.clear_session()
 
         cv_metrics = {
             f"cv_{metric}": float(np.mean([m[metric] for m in fold_metrics]))
@@ -235,9 +236,9 @@ def _run_deep_model(
         logger.info("Saved %s (%s) metadata: %s", name, tag, metadata_path)
         store.add(name, tag, cv_metrics, test_metrics, preds)
 
-        import tensorflow as tf
+        import keras
 
-        tf.keras.backend.clear_session()
+        keras.backend.clear_session()
 
 
 def run_lstm(

@@ -47,6 +47,8 @@ from src.models.classical import (
 )
 from src.models.arima_model import run_arima
 from src.models.sarimax_model import run_sarimax
+from src.models.deep_learning import run_lstm, run_gru
+from src.models.stacking import run_stacking
 from src.models.deep_learning import run_lstm, run_gru, run_stacked_lstm
 
 
@@ -73,6 +75,7 @@ def parse_args() -> argparse.Namespace:
             "gru",
             "stacked_lstm",
             "slstm",
+            "stack"
         ],
         help="Run only the specified models (default: all enabled in config)",
     )
@@ -240,6 +243,8 @@ def main() -> None:
             run_lstm(datasets, store, cfg)
         if should_run("gru",  "gru"):
             run_gru(datasets, store, cfg)
+        if should_run("stack", "stacking"):
+            run_stacking(datasets, store, cfg)
         if should_run("stacked_lstm", "stacked_lstm") or should_run("slstm", "stacked_lstm"):
             run_stacked_lstm(train_masters, test_masters, store, cfg)
     else:

@@ -181,3 +181,19 @@ logging:
   level: INFO                        # DEBUG | INFO | WARNING | ERROR
   log_to_file: true
   filename_prefix: "bg_prediction"
+
+# Stacking (OOF) configuration
+stacking:
+  enabled: true
+  n_folds: 5
+  time_series: true
+  base_models:
+    - xgboost
+    - lstm
+  meta_model:
+    n_estimators: 200
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+  save_oof: true

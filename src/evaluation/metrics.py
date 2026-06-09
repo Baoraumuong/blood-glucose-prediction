@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, TimeSeriesSplit
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def cv_evaluate(
     shuffle: bool = False,
 ) -> dict[str, float]:
     """
-    KFold cross-validation returning mean ± std of RMSE and R².
+    Time-series-aware cross-validation returning mean of RMSE, MAE, R², and MARD.
 
     Parameters
     ----------
@@ -76,16 +76,20 @@ def cv_evaluate(
     y : np.ndarray, shape (n_samples, forecast_steps)
     n_folds : int
     shuffle : bool
-        False preserves temporal ordering (recommended for time-series).
+        If True, use KFold. If False, use TimeSeriesSplit to preserve temporal order.
 
     Returns
     -------
     dict with keys: cv_rmse, cv_mae, cv_r2, cv_mard
     """
-    kf = KFold(n_splits=n_folds, shuffle=shuffle)
+    if shuffle:
+        cv = KFold(n_splits=n_folds, shuffle=True)
+    else:
+        cv = TimeSeriesSplit(n_splits=n_folds)
+
     fold_metrics: list[dict[str, float]] = []
 
-    for tr_idx, val_idx in kf.split(X):
+    for tr_idx, val_idx in cv.split(X):
         model.fit(X[tr_idx], y[tr_idx])
         preds = model.predict(X[val_idx])
         fold_metrics.append(compute_all_metrics(y[val_idx], preds))
