@@ -49,13 +49,8 @@ window:
 
 # Feature engineering
 feature_engineering:
-  savgol_window:    11               # Savitzky-Golay smoothing window
-  savgol_polyorder: 2
   interpolate_limit: 6              # max consecutive NaN steps to fill
   rolling_insulin_window: 36        # 3-hour window (36 × 5 min) for std
-  kalman:
-    process_variance: 0.001
-    measurement_variance: 4.0
   exclude_features:
     - acceleration
     - basis_steps
@@ -181,3 +176,19 @@ logging:
   level: INFO                        # DEBUG | INFO | WARNING | ERROR
   log_to_file: true
   filename_prefix: "bg_prediction"
+
+# Stacking (OOF) configuration
+stacking:
+  enabled: true
+  n_folds: 5
+  time_series: true
+  base_models:
+    - xgboost
+    - lstm
+  meta_model:
+    n_estimators: 200
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+  save_oof: true

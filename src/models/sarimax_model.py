@@ -13,7 +13,12 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from src.evaluation.metrics import ResultStore, compute_all_metrics
 from src.models.persistence import safe_name, save_pickle_artifact
-from src.models.time_series_utils import fill_series_gaps, is_finite_window
+from src.models.time_series_utils import (
+    fill_series_gaps,
+    is_finite_window,
+    normalize_series_and_exog,
+    ensure_supported_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +52,14 @@ def _fit_sarimax(
     order: tuple[int, int, int],
 ) -> tuple[Any | None, pd.Series | None, pd.DataFrame | None, pd.Series | None, pd.Series | None]:
     train_model = fill_series_gaps(train_series)
+    train_model, train_exog = normalize_series_and_exog(train_model, train_exog)
     if train_model.empty:
         return None, None, None, None, None
 
-    train_smooth = train_model.ewm(span=5, adjust=False).mean()
-    train_x, _, mean, std = _scale_exog(
-        train_exog.reindex(train_model.index),
-        train_exog.reindex(train_model.index),
-    )
+    train_x, _, mean, std = _scale_exog(train_exog, train_exog)
     try:
         fit = SARIMAX(
-            train_smooth,
+            train_model,
             exog=train_x,
             order=order,
             enforce_stationarity=False,
@@ -67,7 +69,7 @@ def _fit_sarimax(
     except Exception as exc:
         logger.warning("SARIMAX fit failed: %s", exc)
         return None, None, None, None, None
-    return fit, train_smooth, train_x, mean, std
+    return fit, train_model, train_x, mean, std
 
 
 def _transform_exog(exog: pd.DataFrame, mean: pd.Series, std: pd.Series) -> pd.DataFrame:
@@ -77,7 +79,7 @@ def _transform_exog(exog: pd.DataFrame, mean: pd.Series, std: pd.Series) -> pd.D
 
 def _forecast_windows(
     fit: Any,
-    train_smooth: pd.Series,
+    train_history: pd.Series,
     train_x: pd.DataFrame,
     test_series: pd.Series,
     test_exog: pd.DataFrame,
@@ -86,15 +88,16 @@ def _forecast_windows(
     n_forecast: int,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     test_model = fill_series_gaps(test_series)
+    test_model, test_exog = normalize_series_and_exog(test_model, test_exog)
     if test_model.empty:
         return None, None
 
-    test_x = _transform_exog(test_exog.reindex(test_model.index), exog_mean, exog_std)
-    all_model_series = pd.concat([train_smooth, test_model])
-    all_actual_series = pd.concat([train_smooth, pd.to_numeric(test_series, errors="coerce")])
+    test_x = _transform_exog(test_exog, exog_mean, exog_std)
+    all_model_series = pd.concat([train_history, test_model])
+    all_actual_series = pd.concat([train_history, pd.to_numeric(test_series, errors="coerce")])
     all_exog = pd.concat([train_x, test_x])
     preds_list, actuals_list = [], []
-    n_train = len(train_smooth)
+    n_train = len(train_history)
     n_test = min(len(test_model), len(test_series))
 
     for i in range(0, n_test - n_forecast + 1, n_forecast):
@@ -110,6 +113,13 @@ def _forecast_windows(
         try:
             history = all_model_series.iloc[:start]
             history_exog = all_exog.iloc[:start]
+            if isinstance(history.index, pd.DatetimeIndex) and history.index.freq is None:
+                history = history.copy()
+                history_exog = history_exog.copy()
+                future_exog = future_exog.copy()
+                history.index = pd.RangeIndex(len(history))
+                history_exog.index = pd.RangeIndex(len(history_exog))
+                future_exog.index = pd.RangeIndex(len(future_exog))
             fc = fit.apply(history, exog=history_exog, refit=False).forecast(
                 n_forecast,
                 exog=future_exog,
@@ -135,13 +145,13 @@ def _sarimax_patient_forecast(
     order: tuple[int, int, int],
     n_forecast: int,
 ) -> tuple[np.ndarray | None, np.ndarray | None, dict[str, Any] | None]:
-    fit, train_smooth, train_x, mean, std = _fit_sarimax(train_series, train_exog, order)
-    if fit is None or train_smooth is None or train_x is None or mean is None or std is None:
+    fit, train_history, train_x, mean, std = _fit_sarimax(train_series, train_exog, order)
+    if fit is None or train_history is None or train_x is None or mean is None or std is None:
         return None, None, None
 
     preds, actuals = _forecast_windows(
         fit,
-        train_smooth,
+        train_history,
         train_x,
         test_series,
         test_exog,
@@ -151,7 +161,7 @@ def _sarimax_patient_forecast(
     )
     artifact = {
         "fit": fit,
-        "train_smooth": train_smooth,
+        "train_history": train_history,
         "train_x": train_x,
         "exog_mean": mean,
         "exog_std": std,
@@ -183,6 +193,8 @@ def _sarimax_cv_metrics(
         val_idx = np.sort(val_idx)
         fold_train = clean.iloc[tr_idx]
         fold_val = clean.iloc[val_idx]
+        fold_train = ensure_supported_series(fold_train)
+        fold_val = ensure_supported_series(fold_val)
         if len(fold_val) < n_forecast or len(fold_train) < n_forecast:
             continue
         fold_train_exog = train_exog.reindex(clean.index).iloc[tr_idx]
@@ -224,14 +236,10 @@ def run_sarimax(
     w = cfg["window"]
     n_forecast = w["forecast_minutes"] // w["freq_minutes"]
 
-    for input_col, smoothing_label in [
-        ("glucose_level", "Savitzky-Golay"),
-        ("raw_glucose_level", "no Savitzky-Golay"),
-    ]:
+    for input_col, feature_tag in [("raw_glucose_level", "with features")]:
         all_preds: list[np.ndarray] = []
         test_metrics_by_patient: list[dict[str, float]] = []
         cv_metrics_by_patient: list[dict[str, float]] = []
-        feature_tag = f"with features + {smoothing_label}"
 
         for key in sorted(train_masters.keys()):
             if key not in test_masters:
@@ -291,18 +299,17 @@ def run_sarimax(
                     "n_forecast": n_forecast,
                 },
             )
-            logger.info("Saved SARIMAX (%s, %s) artifact: %s", key, smoothing_label, save_path)
+            logger.info("Saved SARIMAX (%s) artifact: %s", key, save_path)
             logger.info(
-                "  SARIMAX %s (%s, %d exog) -> RMSE=%.3f R2=%.4f",
+                "  SARIMAX %s (%d exog) -> RMSE=%.3f R2=%.4f",
                 key,
-                smoothing_label,
                 len(exog_cols),
                 test_metrics["rmse"],
                 test_metrics["r2"],
             )
 
         if not test_metrics_by_patient:
-            logger.error("SARIMAX produced no results for %s.", smoothing_label)
+            logger.error("SARIMAX produced no results.")
             continue
 
         avg_test = {
@@ -320,8 +327,7 @@ def run_sarimax(
 
         store.add("SARIMAX", feature_tag, avg_cv, avg_test, np.vstack(all_preds))
         logger.info(
-            "SARIMAX avg (%s) -> CV RMSE=%.3f | Test RMSE=%.3f R2=%.4f",
-            smoothing_label,
+            "SARIMAX avg -> CV RMSE=%.3f | Test RMSE=%.3f R2=%.4f",
             avg_cv.get("cv_rmse", float("nan")),
             avg_test["rmse"],
             avg_test["r2"],

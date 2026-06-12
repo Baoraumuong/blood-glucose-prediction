@@ -129,24 +129,15 @@ def plot_feature_impact(
     records = []
     for m in res_df["model"].unique():
         model_df = res_df[res_df.model == m]
-        smoothings = {
-            tag.replace("with features + ", "")
-            for tag in model_df["features"]
-            if tag.startswith("with features + ")
-        } or {""}
-        for smoothing in smoothings:
-            with_tag = f"with features + {smoothing}" if smoothing else "with features"
-            base_tag = f"baseline + {smoothing}" if smoothing else "baseline"
-            sf = model_df[model_df.features == with_tag]
-            sb = model_df[model_df.features == base_tag]
-            if sf.empty or sb.empty:
-                continue
-            label = f"{m} ({smoothing})" if smoothing else m
-            records.append(dict(
-                model=label,
-                delta_rmse=sf["test_rmse"].iloc[0] - sb["test_rmse"].iloc[0],
-                delta_r2=sf["test_r2"].iloc[0] - sb["test_r2"].iloc[0],
-            ))
+        sf = model_df[model_df.features == "with features"]
+        sb = model_df[model_df.features == "baseline"]
+        if sf.empty or sb.empty:
+            continue
+        records.append(dict(
+            model=m,
+            delta_rmse=sf["test_rmse"].iloc[0] - sb["test_rmse"].iloc[0],
+            delta_r2=sf["test_r2"].iloc[0] - sb["test_r2"].iloc[0],
+        ))
     delta_df = pd.DataFrame(records)
     if delta_df.empty:
         logger.warning("Feature-impact plot skipped: no matched feature/baseline rows")

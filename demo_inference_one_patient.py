@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--patient", required=True, help="Patient key, e.g. 540_2020")
     parser.add_argument("--model", required=True, help="Model name, e.g. RandomForest, LSTM, ARIMA")
-    parser.add_argument("--features", required=True, help='Feature tag, e.g. "baseline + no Savitzky-Golay"')
+    parser.add_argument("--features", required=True, help='Feature tag, e.g. "baseline" or "with features"')
     parser.add_argument(
         "--masters-dir",
         default=None,
@@ -98,7 +98,7 @@ def _run_arima(cfg: dict, feature_tag: str, patient: str, df: pd.DataFrame) -> t
     test_series = df.get(RAW_TARGET_COL, df[TARGET_COL])
     return _forecast_windows(
         artifact["fit"],
-        artifact["train_smooth"],
+        artifact["train_history"],
         test_series,
         artifact["n_forecast"],
     )
@@ -111,7 +111,7 @@ def _run_sarimax(cfg: dict, feature_tag: str, patient: str, df: pd.DataFrame) ->
     test_series = df.get(RAW_TARGET_COL, df[TARGET_COL])
     return _forecast_windows(
         artifact["fit"],
-        artifact["train_smooth"],
+        artifact["train_history"],
         artifact["train_x"],
         test_series,
         df[artifact["exog_cols"]],

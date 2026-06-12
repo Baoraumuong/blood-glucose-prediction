@@ -15,7 +15,7 @@ The default task is:
 - Input: the previous 30 minutes of data, or 6 samples at 5-minute frequency
 - Output: the next 30 minutes of glucose, or 6 forecast steps
 - Target: raw CGM glucose for evaluation
-- Input variants: smoothed glucose and raw glucose
+- Input: raw CGM glucose only
 - Feature variants: engineered feature set and glucose-only baseline
 
 ## Models
@@ -28,12 +28,10 @@ The main pipeline can run:
 | Statistical | ARIMA, SARIMAX |
 | Deep learning | LSTM, GRU |
 
-Classical and deep models run across four dataset variants:
+Classical and deep models run across two raw-data variants:
 
-- `with features + Savitzky-Golay`
-- `baseline + Savitzky-Golay`
-- `with features + no Savitzky-Golay`
-- `baseline + no Savitzky-Golay`
+- `with features`
+- `baseline`
 
 ARIMA runs as a glucose-only baseline. SARIMAX uses the aligned non-glucose
 features as exogenous variables.
@@ -195,7 +193,7 @@ All primary settings are in `configs/config.yaml`.
 | `paths` | Dataset, output, logs, plots, results, checkpoint paths |
 | `dataset` | Cohorts, XML suffixes, parsed features, CGM frequency |
 | `window` | Lookback and forecast horizon |
-| `feature_engineering` | Savitzky-Golay smoothing, rolling insulin features, excluded features |
+| `feature_engineering` | Rolling insulin features and excluded features |
 | `evaluation` | CV folds, shuffle flag, SVR subsampling, metrics |
 | `models` | Classical and statistical model hyperparameters |
 | `deep_learning` | LSTM/GRU architecture, epochs, batch size, callbacks |
@@ -221,7 +219,7 @@ steps are:
 1. Discover train/test XML files from the configured cohorts.
 2. Parse CGM glucose and align it to a dense 5-minute grid.
 3. Keep `raw_glucose_level` as the evaluation target.
-4. Build `glucose_level` as a causal Savitzky-Golay smoothed input.
+4. Build `glucose_level` as a raw CGM input alias.
 5. Snap point events such as bolus, meal, basal, GSR, finger-stick, and skin
    temperature to the nearest glucose timestamp.
 6. Expand interval events such as exercise, sleep, and temporary basal onto the
@@ -236,8 +234,8 @@ The cached files are written by `save_master_dataframes()` in
 
 | Feature | Description |
 |---|---|
-| `glucose_level` | Causal Savitzky-Golay smoothed CGM input |
-| `raw_glucose_level` | Unsmoothed CGM target used for evaluation |
+| `glucose_level` | Raw CGM input |
+| `raw_glucose_level` | Raw CGM target used for evaluation |
 | `bolus` | Bolus insulin aggregated per 5-minute glucose timestamp |
 | `basal` | Basal rate aligned to the glucose grid |
 | `meal` | Meal carbohydrates aggregated per timestamp |
@@ -260,24 +258,6 @@ basis_steps
 basis_air_temperature
 basis_heart_rate
 ```
-
-## Savitzky-Golay Smoothing
-
-The default smoothing config is:
-
-```yaml
-feature_engineering:
-  savgol_window: 11
-  savgol_polyorder: 2
-```
-
-Because the CGM grid is 5 minutes, a window of 11 samples covers 55 minutes.
-The implementation is causal: each smoothed value uses only the current reading
-and prior readings. This reduces sensor noise without leaking future glucose
-values into the lookback window.
-
-The pipeline also builds no-Savitzky-Golay variants by replacing
-`glucose_level` with `raw_glucose_level` before windowing.
 
 ## Windowing And Scaling
 

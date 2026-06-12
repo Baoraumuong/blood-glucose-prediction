@@ -25,9 +25,10 @@ def _build_rnn(
     learning_rate: float,
 ) -> Any:
     """Construct and compile a two-layer LSTM or GRU."""
-    from tensorflow.keras.layers import GRU, LSTM, Dense, Dropout, Input
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.optimizers import Adam
+    
+    from keras.layers import GRU, LSTM, Dense, Dropout, Input
+    from keras.models import Sequential
+    from keras.optimizers import Adam
 
     rnn_layer = LSTM if rnn_type.lower() == "lstm" else GRU
     model = Sequential(
@@ -79,7 +80,7 @@ def _run_deep_model(
     store: ResultStore,
     cfg: dict[str, Any],
 ) -> None:
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+    from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
     dl_cfg = cfg.get("deep_learning", {})
     model_cfg = dl_cfg.get(rnn_type.lower(), {})
@@ -111,7 +112,6 @@ def _run_deep_model(
             v["y_test"],
             v["scaler"],
             v.get("feature_cols"),
-            v.get("use_savgol"),
         )
         for v in datasets.get("deep_variants", [])
     ]
@@ -126,7 +126,6 @@ def _run_deep_model(
                 datasets["y_test"],
                 datasets["scaler_full"],
                 datasets.get("full_feature_cols"),
-                True,
             ),
             (
                 "baseline",
@@ -136,11 +135,10 @@ def _run_deep_model(
                 datasets["y_test"],
                 datasets["scaler_base"],
                 datasets.get("base_feature_cols"),
-                True,
             ),
         ]
 
-    for tag, X3d_tr, X3d_te, ytr_s, yte_orig, target_scaler, feature_cols, use_savgol in deep_iter:
+    for tag, X3d_tr, X3d_te, ytr_s, yte_orig, target_scaler, feature_cols in deep_iter:
         logger.info("Training %s (%s) ...", name, tag)
         n_folds = cfg.get("evaluation", {}).get("n_folds", 5)
         shuffle = cfg.get("evaluation", {}).get("kfold_shuffle", False)
@@ -172,9 +170,9 @@ def _run_deep_model(
             val_actual = target_scaler.inverse_transform_y(ytr_s[val_idx])
             fold_metrics.append(compute_all_metrics(val_actual, val_preds))
 
-            import tensorflow as tf
+            import keras
 
-            tf.keras.backend.clear_session()
+            keras.backend.clear_session()
 
         cv_metrics = {
             f"cv_{metric}": float(np.mean([m[metric] for m in fold_metrics]))
@@ -217,7 +215,6 @@ def _run_deep_model(
                 "feature_tag": tag,
                 "scaler": target_scaler,
                 "feature_cols": feature_cols,
-                "use_savgol": use_savgol,
                 "input_shape": tuple(X3d_tr.shape[1:]),
             },
         )
@@ -225,9 +222,9 @@ def _run_deep_model(
         logger.info("Saved %s (%s) metadata: %s", name, tag, metadata_path)
         store.add(name, tag, cv_metrics, test_metrics, preds)
 
-        import tensorflow as tf
+        import keras
 
-        tf.keras.backend.clear_session()
+        keras.backend.clear_session()
 
 
 def run_lstm(
@@ -255,7 +252,7 @@ def run_stacked_lstm(
     from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
     from tensorflow.keras.models import load_model
 
-    from src.features.windowing import prepare_kalman_datasets
+    from src.features.windowing import prepare_datasets
 
     dl_cfg = cfg.get("deep_learning", {})
     model_cfg = dl_cfg.get("stacked_lstm", {})
@@ -263,7 +260,7 @@ def run_stacked_lstm(
     fc_steps = w["forecast_minutes"] // w["freq_minutes"]
     name = "STACKED_LSTM"
 
-    kalman_datasets = prepare_kalman_datasets(train_masters, test_masters, cfg)
+    raw_datasets = prepare_datasets(train_masters, test_masters, cfg)
     deep_iter = [
         (
             v["tag"],
@@ -275,7 +272,7 @@ def run_stacked_lstm(
             v["scaler"],
             v.get("feature_cols"),
         )
-        for v in kalman_datasets.get("deep_variants", [])
+        for v in raw_datasets.get("deep_variants", [])
     ]
 
     def build_model(input_shape: tuple[int, int]) -> Any:
@@ -386,7 +383,6 @@ def run_stacked_lstm(
                 "feature_tag": tag,
                 "scaler": target_scaler,
                 "feature_cols": feature_cols,
-                "use_kalman": True,
                 "input_shape": tuple(X3d_tr.shape[1:]),
                 "output_steps": fc_steps,
                 "loss": "huber",

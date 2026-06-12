@@ -2,7 +2,7 @@
 data/loader.py
 --------------
 Discover OhioT1DM XML files and build per-patient master DataFrames
-with smoothed glucose and engineered features.
+with raw glucose and engineered features.
 """
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.signal import savgol_filter
 
 from src.data.parser import OhioT1DMParser, _parse_ts
 
@@ -75,32 +74,6 @@ def _align_glucose_to_grid(gl: pd.DataFrame, resample_freq: str) -> pd.DataFrame
     rounded = rounded.groupby(level=0).mean().sort_index()
     glucose_index = pd.date_range(rounded.index.min(), rounded.index.max(), freq=resample_freq)
     return rounded.reindex(glucose_index)
-
-
-def _causal_savgol(series: pd.Series, window_length: int, polyorder: int) -> pd.Series:
-    """
-    Apply Savitzky-Golay smoothing using only current and past values.
-
-    scipy.signal.savgol_filter is centered by default, which would let future
-    glucose readings influence lookback features.
-    """
-    if window_length % 2 == 0:
-        window_length += 1
-    if window_length <= polyorder or len(series) < window_length:
-        return series.copy()
-
-    smoothed = series.copy()
-    values = series.to_numpy(dtype=float)
-    for i in range(window_length - 1, len(values)):
-        window = values[i - window_length + 1 : i + 1]
-        if np.isnan(window).any():
-            continue
-        smoothed.iloc[i] = savgol_filter(
-            window,
-            window_length=window_length,
-            polyorder=polyorder,
-        )[-1]
-    return smoothed
 
 
 def _align_to_glucose_index(
@@ -343,8 +316,6 @@ def find_xml_files(
 def build_patient_master(
     xml_path: str | Path,
     resample_freq: str = "5min",
-    savgol_window: int = 11,
-    savgol_polyorder: int = 2,
     interpolate_limit: int = 6,
     rolling_insulin_window: int = 36,
 ) -> pd.DataFrame:
@@ -352,9 +323,8 @@ def build_patient_master(
     Build a single master DataFrame for one patient file.
 
     Columns returned:
-      - glucose_level      : causal Savitzky-Golay smoothed glucose input,
-                             preserving missing CGM rows
-      - raw_glucose_level  : unsmoothed glucose target for evaluation
+      - glucose_level      : raw CGM input, preserving missing CGM rows
+      - raw_glucose_level  : raw CGM target for evaluation
       - basis_gsr          : GSR wearable signal aligned to the CGM timestamp grid
       - basis_sleep        : sleep signal aligned to the CGM timestamp grid
       - total_insulin      : bolus + basal dose in each 5-min window
@@ -368,8 +338,6 @@ def build_patient_master(
         Path to the patient XML file.
     resample_freq : str
         CGM resampling frequency (should match config).
-    savgol_window, savgol_polyorder : int
-        Savitzky-Golay filter parameters.
     interpolate_limit : int
         Deprecated; glucose_level missing values are not filled.
     rolling_insulin_window : int
@@ -388,11 +356,7 @@ def build_patient_master(
     gl = _align_glucose_to_grid(gl, resample_freq)
 
     gl["raw_glucose_level"] = gl["value"]
-    gl["glucose_level"] = _causal_savgol(
-        gl["value"],
-        window_length=savgol_window,
-        polyorder=savgol_polyorder,
-    )
+    gl["glucose_level"] = gl["value"]
     gl = gl.drop(columns="value")
 
     # ── 2. Bolus insulin ─────────────────────────────────────────────────
@@ -481,8 +445,6 @@ def build_all_masters(
             df = build_patient_master(
                 path,
                 resample_freq=cfg["dataset"]["resample_freq"],
-                savgol_window=fe_cfg.get("savgol_window", 11),
-                savgol_polyorder=fe_cfg.get("savgol_polyorder", 2),
                 interpolate_limit=fe_cfg.get("interpolate_limit", 6),
                 rolling_insulin_window=fe_cfg.get("rolling_insulin_window", 36),
             )
@@ -496,8 +458,6 @@ def build_all_masters(
 def load_master_dataframes(
     split_name: str,
     processed_dir: str | Path,
-    savgol_window: int = 11,
-    savgol_polyorder: int = 2,
 ) -> dict[str, pd.DataFrame]:
     """
     Load exported per-patient master DataFrames for a split.
@@ -518,11 +478,7 @@ def load_master_dataframes(
         df = pd.read_csv(path, parse_dates=["ts"], index_col="ts")
         df.index.name = None
         if {"raw_glucose_level", "glucose_level"}.issubset(df.columns):
-            df["glucose_level"] = _causal_savgol(
-                df["raw_glucose_level"],
-                window_length=savgol_window,
-                polyorder=savgol_polyorder,
-            )
+            df["glucose_level"] = df["raw_glucose_level"]
         df = _apply_temp_basal_override(df)
         masters[patient_key] = df.sort_index()
     return masters

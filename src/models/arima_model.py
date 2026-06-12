@@ -13,7 +13,12 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from src.evaluation.metrics import ResultStore, compute_all_metrics
 from src.models.persistence import safe_name, save_pickle_artifact
-from src.models.time_series_utils import fill_series_gaps, is_finite_window
+from src.models.time_series_utils import (
+    fill_series_gaps,
+    is_finite_window,
+    ensure_monotonic_series,
+    ensure_supported_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +31,9 @@ def _fit_arima(
     if train_model.empty:
         return None, None
 
-    train_smooth = train_model.ewm(span=5, adjust=False).mean()
     try:
         fit = SARIMAX(
-            train_smooth,
+            train_model,
             order=order,
             enforce_stationarity=False,
             enforce_invertibility=False,
@@ -38,12 +42,12 @@ def _fit_arima(
     except Exception as exc:
         logger.warning("ARIMA fit failed: %s", exc)
         return None, None
-    return fit, train_smooth
+    return fit, train_model
 
 
 def _forecast_windows(
     fit: Any,
-    train_smooth: pd.Series,
+    train_history: pd.Series,
     test_series: pd.Series,
     n_forecast: int,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -51,10 +55,10 @@ def _forecast_windows(
     if test_model.empty:
         return None, None
 
-    all_model_series = pd.concat([train_smooth, test_model])
-    all_actual_series = pd.concat([train_smooth, pd.to_numeric(test_series, errors="coerce")])
+    all_model_series = pd.concat([train_history, test_model])
+    all_actual_series = pd.concat([train_history, pd.to_numeric(test_series, errors="coerce")])
     preds_list, actuals_list = [], []
-    n_train = len(train_smooth)
+    n_train = len(train_history)
     n_test = min(len(test_model), len(test_series))
 
     for i in range(0, n_test - n_forecast + 1, n_forecast):
@@ -67,6 +71,9 @@ def _forecast_windows(
             continue
         try:
             history = all_model_series.iloc[:start]
+            if isinstance(history.index, pd.DatetimeIndex) and history.index.freq is None:
+                history = history.copy()
+                history.index = pd.RangeIndex(len(history))
             fc = fit.apply(history, refit=False).forecast(n_forecast)
             if not is_finite_window(fc.values):
                 logger.debug("ARIMA window %d skipped because predictions contain NaN/inf", i)
@@ -87,12 +94,12 @@ def _arima_patient_forecast(
     order: tuple[int, int, int],
     n_forecast: int,
 ) -> tuple[np.ndarray | None, np.ndarray | None, dict[str, Any] | None]:
-    fit, train_smooth = _fit_arima(train_series, order)
-    if fit is None or train_smooth is None:
+    fit, train_history = _fit_arima(train_series, order)
+    if fit is None or train_history is None:
         return None, None, None
 
-    preds, actuals = _forecast_windows(fit, train_smooth, test_series, n_forecast)
-    artifact = {"fit": fit, "train_smooth": train_smooth, "order": order}
+    preds, actuals = _forecast_windows(fit, train_history, test_series, n_forecast)
+    artifact = {"fit": fit, "train_history": train_history, "order": order}
     return preds, actuals, artifact
 
 
@@ -116,12 +123,14 @@ def _arima_cv_metrics(
     for fold_idx, (tr_idx, val_idx) in enumerate(kf.split(clean), start=1):
         fold_train = clean.iloc[np.sort(tr_idx)]
         fold_val = clean.iloc[np.sort(val_idx)]
+        fold_train = ensure_supported_series(fold_train)
+        fold_val = ensure_supported_series(fold_val)
         if len(fold_val) < n_forecast or len(fold_train) < n_forecast:
             continue
-        fit, train_smooth = _fit_arima(fold_train, order)
-        if fit is None or train_smooth is None:
+        fit, train_history = _fit_arima(fold_train, order)
+        if fit is None or train_history is None:
             continue
-        preds, actuals = _forecast_windows(fit, train_smooth, fold_val, n_forecast)
+        preds, actuals = _forecast_windows(fit, train_history, fold_val, n_forecast)
         if preds is None or actuals is None:
             continue
         metrics = compute_all_metrics(actuals, preds)
@@ -151,14 +160,10 @@ def run_arima(
     w = cfg["window"]
     n_forecast = w["forecast_minutes"] // w["freq_minutes"]
 
-    for input_col, smoothing_label in [
-        ("glucose_level", "Savitzky-Golay"),
-        ("raw_glucose_level", "no Savitzky-Golay"),
-    ]:
+    for input_col, feature_tag in [("raw_glucose_level", "baseline")]:
         all_preds: list[np.ndarray] = []
         test_metrics_by_patient: list[dict[str, float]] = []
         cv_metrics_by_patient: list[dict[str, float]] = []
-        feature_tag = f"baseline + {smoothing_label}"
 
         for key in sorted(train_masters.keys()):
             if key not in test_masters:
@@ -172,7 +177,9 @@ def run_arima(
                 continue
 
             tr_ser = train_df[input_col]
+            tr_ser = ensure_monotonic_series(tr_ser)
             te_ser = test_df.get("raw_glucose_level", test_df["glucose_level"])
+            te_ser = ensure_monotonic_series(te_ser)
             cv_metrics = _arima_cv_metrics(tr_ser, order, n_forecast, n_folds, shuffle)
             if cv_metrics is not None:
                 cv_metrics_by_patient.append(cv_metrics)
@@ -198,17 +205,16 @@ def run_arima(
                     "n_forecast": n_forecast,
                 },
             )
-            logger.info("Saved ARIMA (%s, %s) artifact: %s", key, smoothing_label, save_path)
+            logger.info("Saved ARIMA (%s) artifact: %s", key, save_path)
             logger.info(
-                "  ARIMA %s (%s) -> RMSE=%.3f R2=%.4f",
+                "  ARIMA %s -> RMSE=%.3f R2=%.4f",
                 key,
-                smoothing_label,
                 test_metrics["rmse"],
                 test_metrics["r2"],
             )
 
         if not test_metrics_by_patient:
-            logger.error("ARIMA produced no results for %s.", smoothing_label)
+            logger.error("ARIMA produced no results.")
             continue
 
         avg_test = {
@@ -226,8 +232,7 @@ def run_arima(
 
         store.add("ARIMA", feature_tag, avg_cv, avg_test, np.vstack(all_preds))
         logger.info(
-            "ARIMA avg (%s) -> CV RMSE=%.3f | Test RMSE=%.3f R2=%.4f",
-            smoothing_label,
+            "ARIMA avg -> CV RMSE=%.3f | Test RMSE=%.3f R2=%.4f",
             avg_cv.get("cv_rmse", float("nan")),
             avg_test["rmse"],
             avg_test["r2"],

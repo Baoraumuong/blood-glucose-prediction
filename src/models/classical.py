@@ -127,7 +127,6 @@ def _run_model(
     feature_names: list[str] | None = None,
     scaler: Any | None = None,
     feature_cols: list[str] | None = None,
-    use_savgol: bool | None = None,
     param_grid: dict[str, list[Any]] | None = None,
     grid_prefix: str | None = None,
 ) -> None:
@@ -173,7 +172,6 @@ def _run_model(
             "scaler": scaler,
             "feature_cols": feature_cols,
             "feature_names": feature_names,
-            "use_savgol": use_savgol,
             "best_params": best_params,
         },
     )
@@ -260,8 +258,7 @@ def run_linear_regression(
                    shuffle=shuffle,
                    feature_names=variant["flat_feature_names"],
                    scaler=variant.get("scaler"),
-                   feature_cols=variant.get("feature_cols"),
-                   use_savgol=variant.get("use_savgol"))
+                   feature_cols=variant.get("feature_cols"))
 
 
 def run_svr(
@@ -296,7 +293,6 @@ def run_svr(
                    feature_names=variant["flat_feature_names"],
                    scaler=variant.get("scaler"),
                    feature_cols=variant.get("feature_cols"),
-                   use_savgol=variant.get("use_savgol"),
                    param_grid=model_cfg.get("param_grid"),
                    grid_prefix="estimator")
 
@@ -333,7 +329,6 @@ def run_xgboost(
                    feature_names=variant["flat_feature_names"],
                    scaler=variant.get("scaler"),
                    feature_cols=variant.get("feature_cols"),
-                   use_savgol=variant.get("use_savgol"),
                    param_grid=model_cfg.get("param_grid"),
                    grid_prefix="estimator")
 
@@ -363,7 +358,6 @@ def run_decision_tree(
                    feature_names=variant["flat_feature_names"],
                    scaler=variant.get("scaler"),
                    feature_cols=variant.get("feature_cols"),
-                   use_savgol=variant.get("use_savgol"),
                    param_grid=model_cfg.get("param_grid"))
 
 
@@ -394,7 +388,6 @@ def run_random_forest(
                    feature_names=variant["flat_feature_names"],
                    scaler=variant.get("scaler"),
                    feature_cols=variant.get("feature_cols"),
-                   use_savgol=variant.get("use_savgol"),
                    param_grid=model_cfg.get("param_grid"))
 
 
@@ -422,5 +415,4 @@ def run_knn(
                    feature_names=variant["flat_feature_names"],
                    scaler=variant.get("scaler"),
                    feature_cols=variant.get("feature_cols"),
-                   use_savgol=variant.get("use_savgol"),
                    param_grid=model_cfg.get("param_grid"))

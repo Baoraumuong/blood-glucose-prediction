@@ -15,9 +15,25 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, TimeSeriesSplit
 
 logger = logging.getLogger(__name__)
+
+
+def _format_horizon_losses(
+    metrics: dict[str, float],
+    metric_name: str = "rmse",
+    prefix: str = "",
+) -> str:
+    values = []
+    step = 1
+    while True:
+        key = f"{prefix}{metric_name}_t{step}"
+        if key not in metrics:
+            break
+        values.append(f"t{step}={metrics[key]:.3f}")
+        step += 1
+    return ", ".join(values)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -47,12 +63,37 @@ def mard(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def compute_all_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
-    return dict(
+    metrics = dict(
         rmse=rmse(y_true, y_pred),
         mae=mae(y_true, y_pred),
         r2=r2(y_true, y_pred),
         mard=mard(y_true, y_pred),
     )
+    metrics.update(compute_horizon_metrics(y_true, y_pred))
+    return metrics
+
+
+def compute_horizon_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    """Compute metrics for each forecast step when targets are multi-step."""
+    y_true_arr = np.asarray(y_true)
+    y_pred_arr = np.asarray(y_pred)
+    if y_true_arr.ndim < 2 or y_pred_arr.ndim < 2:
+        return {}
+
+    n_steps = min(y_true_arr.shape[1], y_pred_arr.shape[1])
+    if n_steps <= 1:
+        return {}
+
+    metrics: dict[str, float] = {}
+    for step_idx in range(n_steps):
+        suffix = f"t{step_idx + 1}"
+        true_step = y_true_arr[:, step_idx]
+        pred_step = y_pred_arr[:, step_idx]
+        metrics[f"rmse_{suffix}"] = rmse(true_step, pred_step)
+        metrics[f"mae_{suffix}"] = mae(true_step, pred_step)
+        metrics[f"r2_{suffix}"] = r2(true_step, pred_step)
+        metrics[f"mard_{suffix}"] = mard(true_step, pred_step)
+    return metrics
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,7 +108,7 @@ def cv_evaluate(
     shuffle: bool = False,
 ) -> dict[str, float]:
     """
-    KFold cross-validation returning mean ± std of RMSE and R².
+    Time-series-aware cross-validation returning mean of RMSE, MAE, R², and MARD.
 
     Parameters
     ----------
@@ -76,16 +117,20 @@ def cv_evaluate(
     y : np.ndarray, shape (n_samples, forecast_steps)
     n_folds : int
     shuffle : bool
-        False preserves temporal ordering (recommended for time-series).
+        If True, use KFold. If False, use TimeSeriesSplit to preserve temporal order.
 
     Returns
     -------
     dict with keys: cv_rmse, cv_mae, cv_r2, cv_mard
     """
-    kf = KFold(n_splits=n_folds, shuffle=shuffle)
+    if shuffle:
+        cv = KFold(n_splits=n_folds, shuffle=True)
+    else:
+        cv = TimeSeriesSplit(n_splits=n_folds)
+
     fold_metrics: list[dict[str, float]] = []
 
-    for tr_idx, val_idx in kf.split(X):
+    for tr_idx, val_idx in cv.split(X):
         model.fit(X[tr_idx], y[tr_idx])
         preds = model.predict(X[val_idx])
         fold_metrics.append(compute_all_metrics(y[val_idx], preds))
@@ -158,6 +203,12 @@ class ResultStore:
             test_metrics["rmse"],
             test_metrics["r2"],
         )
+        test_rmse_by_step = _format_horizon_losses(test_metrics, metric_name="rmse")
+        if test_rmse_by_step:
+            logger.info("[%-35s] Test RMSE by forecast step: %s", key, test_rmse_by_step)
+        cv_rmse_by_step = _format_horizon_losses(cv_metrics, metric_name="rmse", prefix="cv_")
+        if cv_rmse_by_step:
+            logger.info("[%-35s] CV RMSE by forecast step: %s", key, cv_rmse_by_step)
 
     def to_dataframe(self) -> pd.DataFrame:
         df = pd.DataFrame(self._records)

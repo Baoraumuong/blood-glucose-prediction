@@ -47,6 +47,8 @@ from src.models.classical import (
 )
 from src.models.arima_model import run_arima
 from src.models.sarimax_model import run_sarimax
+from src.models.deep_learning import run_lstm, run_gru
+from src.models.stacking import run_stacking
 from src.models.deep_learning import run_lstm, run_gru, run_stacked_lstm
 
 
@@ -73,6 +75,7 @@ def parse_args() -> argparse.Namespace:
             "gru",
             "stacked_lstm",
             "slstm",
+            "stack"
         ],
         help="Run only the specified models (default: all enabled in config)",
     )
@@ -147,18 +150,13 @@ def main() -> None:
 
     if not args.rebuild_masters:
         logger.info("[1/5] Loading patient master DataFrames from %s ...", processed_dir)
-        fe_cfg = cfg.get("feature_engineering", {})
         train_masters = load_master_dataframes(
             "train",
             processed_dir,
-            savgol_window=fe_cfg.get("savgol_window", 11),
-            savgol_polyorder=fe_cfg.get("savgol_polyorder", 2),
         )
         test_masters = load_master_dataframes(
             "test",
             processed_dir,
-            savgol_window=fe_cfg.get("savgol_window", 11),
-            savgol_polyorder=fe_cfg.get("savgol_polyorder", 2),
         )
 
         missing_train = expected_train - set(train_masters)
@@ -240,6 +238,8 @@ def main() -> None:
             run_lstm(datasets, store, cfg)
         if should_run("gru",  "gru"):
             run_gru(datasets, store, cfg)
+        if should_run("stack", "stacking"):
+            run_stacking(datasets, store, cfg)
         if should_run("stacked_lstm", "stacked_lstm") or should_run("slstm", "stacked_lstm"):
             run_stacked_lstm(train_masters, test_masters, store, cfg)
     else:
