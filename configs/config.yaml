@@ -130,6 +130,11 @@ models:
   arima:
     enabled: true
     order: [2, 1, 2]
+    maxiter: 200
+    param_grid:
+      p: [2]
+      d: [0, 1]
+      q: [2]
 
   sarimax:
     enabled: true

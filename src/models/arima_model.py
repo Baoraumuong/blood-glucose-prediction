@@ -4,11 +4,14 @@ Patient-wise ARIMA forecasting with KFold CV and saved patient artifacts.
 from __future__ import annotations
 
 import logging
+import warnings
+from itertools import product
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from src.evaluation.metrics import ResultStore, compute_all_metrics
@@ -23,22 +26,64 @@ from src.models.time_series_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _as_order(value: Any) -> tuple[int, int, int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"ARIMA order must contain exactly 3 values, got {value!r}")
+    return int(value[0]), int(value[1]), int(value[2])
+
+
+def _iter_order_candidates(
+    model_cfg: dict[str, Any],
+    default_order: tuple[int, int, int],
+) -> list[tuple[int, int, int]]:
+    """Build a deterministic list of ARIMA orders from config."""
+    param_grid = model_cfg.get("param_grid")
+    if not param_grid:
+        return []
+
+    if "order" in param_grid:
+        raw_orders = param_grid["order"]
+        candidates = [_as_order(order) for order in raw_orders]
+    else:
+        p_values = param_grid.get("p", [default_order[0]])
+        d_values = param_grid.get("d", [default_order[1]])
+        q_values = param_grid.get("q", [default_order[2]])
+        candidates = [
+            (int(p), int(d), int(q))
+            for p, d, q in product(p_values, d_values, q_values)
+        ]
+
+    seen: set[tuple[int, int, int]] = set()
+    unique_candidates: list[tuple[int, int, int]] = []
+    for order in candidates:
+        if order in seen:
+            continue
+        seen.add(order)
+        unique_candidates.append(order)
+    return unique_candidates
+
+
 def _fit_arima(
     train_series: pd.Series,
     order: tuple[int, int, int],
+    maxiter: int = 200,
 ) -> tuple[Any | None, pd.Series | None]:
     train_model = fill_series_gaps(train_series)
     if train_model.empty:
         return None, None
 
     try:
-        fit = SARIMAX(
-            train_model,
-            order=order,
-            enforce_stationarity=False,
-            enforce_invertibility=False,
-            missing="none",
-        ).fit(disp=False)
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always", ConvergenceWarning)
+            fit = SARIMAX(
+                train_model,
+                order=order,
+                enforce_stationarity=False,
+                enforce_invertibility=False,
+                missing="none",
+            ).fit(disp=False, maxiter=maxiter)
+        if any(issubclass(w.category, ConvergenceWarning) for w in caught_warnings):
+            logger.debug("ARIMA order %s did not fully converge", order)
     except Exception as exc:
         logger.warning("ARIMA fit failed: %s", exc)
         return None, None
@@ -93,8 +138,9 @@ def _arima_patient_forecast(
     test_series: pd.Series,
     order: tuple[int, int, int],
     n_forecast: int,
+    maxiter: int = 200,
 ) -> tuple[np.ndarray | None, np.ndarray | None, dict[str, Any] | None]:
-    fit, train_history = _fit_arima(train_series, order)
+    fit, train_history = _fit_arima(train_series, order, maxiter=maxiter)
     if fit is None or train_history is None:
         return None, None, None
 
@@ -109,6 +155,7 @@ def _arima_cv_metrics(
     n_forecast: int,
     n_folds: int,
     shuffle: bool,
+    maxiter: int = 200,
 ) -> dict[str, float] | None:
     clean = fill_series_gaps(train_series)
     if len(clean) < n_forecast * 2:
@@ -127,7 +174,7 @@ def _arima_cv_metrics(
         fold_val = ensure_supported_series(fold_val)
         if len(fold_val) < n_forecast or len(fold_train) < n_forecast:
             continue
-        fit, train_history = _fit_arima(fold_train, order)
+        fit, train_history = _fit_arima(fold_train, order, maxiter=maxiter)
         if fit is None or train_history is None:
             continue
         preds, actuals = _forecast_windows(fit, train_history, fold_val, n_forecast)
@@ -145,6 +192,55 @@ def _arima_cv_metrics(
     }
 
 
+def _tune_arima_order(
+    train_series: pd.Series,
+    default_order: tuple[int, int, int],
+    model_cfg: dict[str, Any],
+    cfg: dict[str, Any],
+    n_forecast: int,
+    n_folds: int,
+    shuffle: bool,
+    maxiter: int,
+) -> tuple[tuple[int, int, int], dict[str, float] | None, dict[str, Any] | None]:
+    tuning_cfg = cfg.get("evaluation", {}).get("grid_search", {})
+    candidates = _iter_order_candidates(model_cfg, default_order)
+    if not tuning_cfg.get("enabled", False) or not candidates:
+        metrics = _arima_cv_metrics(
+            train_series, default_order, n_forecast, n_folds, shuffle, maxiter=maxiter
+        )
+        return default_order, metrics, None
+
+    logger.info("ARIMA order search: %d candidate(s)", len(candidates))
+    best_order: tuple[int, int, int] | None = None
+    best_metrics: dict[str, float] | None = None
+    best_rmse = float("inf")
+
+    for candidate_order in candidates:
+        metrics = _arima_cv_metrics(
+            train_series, candidate_order, n_forecast, n_folds, shuffle, maxiter=maxiter
+        )
+        if metrics is None:
+            logger.debug("ARIMA order %s skipped because CV produced no metrics", candidate_order)
+            continue
+        rmse = metrics.get("cv_rmse", float("inf"))
+        logger.debug("ARIMA order %s -> CV RMSE=%.3f", candidate_order, rmse)
+        if np.isfinite(rmse) and rmse < best_rmse:
+            best_order = candidate_order
+            best_metrics = metrics
+            best_rmse = rmse
+
+    if best_order is None:
+        logger.warning("ARIMA order search failed; falling back to order=%s", default_order)
+        metrics = _arima_cv_metrics(
+            train_series, default_order, n_forecast, n_folds, shuffle, maxiter=maxiter
+        )
+        return default_order, metrics, None
+
+    best_params = {"order": list(best_order)}
+    logger.info("Best ARIMA order: %s | CV RMSE=%.3f", best_order, best_rmse)
+    return best_order, best_metrics, best_params
+
+
 def run_arima(
     train_masters: dict[str, pd.DataFrame],
     test_masters: dict[str, pd.DataFrame],
@@ -154,7 +250,8 @@ def run_arima(
     """Run patient-wise ARIMA with KFold CV on training data and hold-out test evaluation."""
     model_cfg = cfg["models"].get("arima", {})
     eval_cfg = cfg.get("evaluation", {})
-    order = tuple(model_cfg.get("order", [2, 1, 2]))
+    default_order = _as_order(model_cfg.get("order", [2, 1, 2]))
+    maxiter = int(model_cfg.get("maxiter", 200))
     n_folds = eval_cfg.get("n_folds", 5)
     shuffle = eval_cfg.get("kfold_shuffle", False)
     w = cfg["window"]
@@ -180,11 +277,22 @@ def run_arima(
             tr_ser = ensure_monotonic_series(tr_ser)
             te_ser = test_df.get("raw_glucose_level", test_df["glucose_level"])
             te_ser = ensure_monotonic_series(te_ser)
-            cv_metrics = _arima_cv_metrics(tr_ser, order, n_forecast, n_folds, shuffle)
+            order, cv_metrics, best_params = _tune_arima_order(
+                tr_ser,
+                default_order,
+                model_cfg,
+                cfg,
+                n_forecast,
+                n_folds,
+                shuffle,
+                maxiter,
+            )
             if cv_metrics is not None:
                 cv_metrics_by_patient.append(cv_metrics)
 
-            preds, actuals, artifact = _arima_patient_forecast(tr_ser, te_ser, order, n_forecast)
+            preds, actuals, artifact = _arima_patient_forecast(
+                tr_ser, te_ser, order, n_forecast, maxiter=maxiter
+            )
             if preds is None or actuals is None or artifact is None:
                 continue
 
@@ -203,6 +311,7 @@ def run_arima(
                     "feature_tag": feature_tag,
                     "input_col": input_col,
                     "n_forecast": n_forecast,
+                    "best_params": best_params,
                 },
             )
             logger.info("Saved ARIMA (%s) artifact: %s", key, save_path)
